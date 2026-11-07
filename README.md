@@ -1,0 +1,402 @@
+# CoreLauncher
+
+**现代化、原生体验的 Minecraft 第三方启动器**：C++ 内核负责版本扫描、官方源安装、文件校验与游戏进程启动，PySide6 负责界面、账号与百宝箱。
+
+> 本项目为非官方项目，与 Mojang Studios / Microsoft 无任何关联。
+> **不提供、不分发、不托管任何 Minecraft 游戏本体、客户端 JAR、资源文件或破解内容。**
+> 使用前请阅读 [免责声明](DISCLAIMER.md)。
+
+`版本 1.6.0` · `Windows 10/11` · `MIT License`
+
+---
+
+## 目录
+
+- [项目介绍](#项目介绍)
+- [功能特性](#功能特性)
+- [界面截图](#界面截图)
+- [构建教程](#构建教程)
+- [使用教程](#使用教程)
+- [开发者模式与离线模式风险声明](#开发者模式与离线模式风险声明)
+- [已知限制](#已知限制)
+- [编译依赖](#编译依赖)
+- [项目结构](#项目结构)
+- [贡献指南](#贡献指南)
+- [开源协议](#开源协议)
+- [免责声明](#免责声明)
+
+---
+
+## 项目介绍
+
+CoreLauncher 是一个面向 Windows 的 Minecraft 启动器，采用「C++ 内核 + Python 界面」的双层架构：
+
+- **C++ 内核（`mc_core.exe`）**：扫描版本目录、解析版本继承、从 Mojang 官方源安装游戏、并发下载并校验文件、解压 natives、构建 JVM 命令并启动游戏。内核通过标准输入输出上的逐行 JSON 协议与界面通信，可独立于界面进行调试。
+- **Python 界面（PySide6）**：负责窗口、动效、液态玻璃主题、Microsoft 正版登录、下载进度展示，以及「百宝箱」中的 Mod 管理、崩溃诊断、整合包导入、服务器监控、截图管理、Java 托管、一键优化、AI 诊断与在线更新。
+
+项目只访问 Mojang 官方源安装游戏，不使用任何第三方镜像；所有下载文件在落盘前校验大小与哈希。启动器自身不携带任何游戏文件。
+
+## 功能特性
+
+### 账号与启动
+
+- **Microsoft 正版登录**：设备码授权流程，令牌自动刷新，使用 Windows DPAPI 加密保存。
+- **官方源安装**：从 `piston-meta.mojang.com` 与 Mojang 官方资源 CDN 获取版本清单、客户端 JAR、依赖库、natives 与 assets。
+- **高并发下载**：依赖库与 assets 使用 16–32 个工作线程；客户端 JAR 使用 HTTP Range 分块并发；失败自动重试，写入前严格校验 SHA1。
+- **版本管理**：自动扫描 `versions/`，支持 `inheritsFrom` 继承版本、旧版 `classifiers` 与 1.19+ 独立 native artifact。
+- **Java 适配**：支持选择 JDK 根目录、`bin` 目录或 `java.exe`，自动补全 `javaw.exe`；按版本声明的 `javaVersion` 自动切换同目录下的运行时；启动前自动收敛非法的 `-Xms`/`-Xmx`。
+- **Java 自动托管**：检测到 Java 缺失时，可从 Adoptium 官方 API 下载 Temurin JDK（SHA-256 校验），解压后自动填入设置。
+- **Java 自动扫描**：读取系统注册表、常见安装目录、`PATH`、Minecraft `runtime/` 与启动器托管目录，探测版本后填入设置页下拉框。
+
+### 百宝箱
+
+- **目录与备份**：一键打开 `.minecraft` / `mods` / `logs` / `saves` / `screenshots`；清理旧日志、崩溃报告与调试日志；手动勾选存档打包备份。
+- **启动前自动备份**：每次启动前静默、增量备份 `saves/`，只有存档变化时才重新压缩，并按份数滚动清理旧备份。
+- **可视化 Mod 管理**：列出所有 Mod（含已禁用），显示名称、版本、Mod ID、加载器与大小；勾选即可通过重命名 `.jar.disabled` 启用/禁用；支持重复 Mod ID 与缺失前置检测。
+- **Modrinth 更新检测**：对 Mod 计算 SHA1 并查询 Modrinth，按游戏版本与加载器筛选可用更新，支持批量下载；旧文件保留为 `.old`。
+- **智能崩溃分析**：读取最新 `crash-reports`（或 `latest.log`、`hs_err_pid*.log`），用规则匹配内存不足、Java 版本不符、前置缺失、Mixin 冲突、显卡驱动、文件损坏、权限、端口占用、登录失效等常见问题，以弹窗形式给出通俗的原因说明与修复步骤，并列出可疑 Mod。
+- **整合包导入**：支持拖拽 `.mrpack` 到窗口或选择文件，解析 `modrinth.index.json`、下载文件、解压 overrides，并可自动安装对应 Fabric 加载器。
+- **服务器监控**：内置 Minecraft Server List Ping 协议，展示在线状态、延迟、人数、版本与 MOTD；一键带 `--server/--port` 参数进服。
+- **截图管理**：缩略图网格预览 `screenshots/`，支持大图查看、上一张/下一张、删除与用系统看图打开。
+- **一键智能优化**：安装 Fabric 加载器与依赖库，并从 Modrinth 安装 Sodium、Iris 与 Fabric API。
+- **AI 诊断**：填写 DeepSeek API Key 后，将日志、崩溃报告、Mod 列表与 Java/内存设置发送给 DeepSeek，返回结构化的原因分析与修复步骤。Key 使用 DPAPI 加密保存在本机。
+- **在线更新**：配置 GitHub 仓库后，通过 Releases API 比对版本，下载新 exe 并由 `.bat` 脚本在程序退出后替换、重启。
+
+### 界面与体验
+
+- QStackedWidget 单页淡入切换：旧页立即隐藏，新页 200ms 透明度 0→1，页面不会重叠。
+- 底部固定启动栏；启动按钮 1.05× 悬停放大、0.93× 按压、OutBack 回弹与发光阴影。
+- 自定义背景图、实时液态玻璃（亚克力）效果、暗黑/明亮双主题。
+- 高 DPI 适配：支持 2K/4K 与 Windows 125%/150% 缩放。
+- 隐藏开发者入口：设置页底部版本号连续点击 7 次解锁，默认不展示（详见[风险声明](#开发者模式与离线模式风险声明)）。
+
+## 界面截图
+
+> 以下位置已预留给界面截图。图片放入 `docs/screenshots/` 后，把「截图待补充」
+> 替换为对应的 Markdown 图片即可（文件名建议见
+> [docs/screenshots/README.md](docs/screenshots/README.md)）。
+
+| 主界面（暗黑） | 主界面（明亮） |
+| :---: | :---: |
+| 截图待补充 | 截图待补充 |
+
+| 百宝箱 · Mod 管理 | 百宝箱 · 崩溃诊断 |
+| :---: | :---: |
+| 截图待补充 | 截图待补充 |
+
+| 百宝箱 · 服务器监控 | 百宝箱 · 一键优化 |
+| :---: | :---: |
+| 截图待补充 | 截图待补充 |
+
+截图请使用示例游戏目录，避免暴露个人路径、账号或 API Key。
+
+## 构建教程
+
+### 环境要求
+
+| 组件 | 要求 |
+| --- | --- |
+| 操作系统 | Windows 10 / 11（64 位） |
+| Python | 3.11 及以上 |
+| PySide6 | 6.x |
+| PyInstaller | 6.x（仅打包时需要） |
+| MinGW-w64 | **i686（32 位）**，GCC 13+，含 `mingw32-make` |
+| CMake | 3.20 及以上 |
+| OpenSSL | 3.x 静态库 |
+| libcurl | 8.11.x 静态库（仓库附带源码包） |
+| nlohmann/json | v3.11.3（仓库内 `third_party/json.hpp`） |
+
+> 32 位内核不影响运行 64 位游戏：内核通过 `CreateProcessW` 启动系统上的 Java。
+>
+> 下面的构建命令使用 `$mingw` 与 `$root` 两个变量。请先设置 `MINGW_ROOT`
+> 环境变量，或把 `$mingw = $env:MINGW_ROOT` 直接改成你的工具链路径。
+
+### 1. 获取源码
+
+```powershell
+git clone https://github.com/YOUR_NAME/CoreLauncher.git
+cd CoreLauncher
+```
+
+### 2. 安装 Python 依赖
+
+```powershell
+python -m pip install --upgrade pip
+python -m pip install PySide6 pyinstaller
+```
+
+### 3. 编译 libcurl 静态库
+
+仓库附带了 curl 8.11.0 源码包。先设置两个变量（按实际情况修改）：
+
+```powershell
+$mingw = $env:MINGW_ROOT      # MinGW-w64 32 位工具链根目录
+$root  = (Get-Location).Path  # 当前仓库根目录
+```
+
+解压并编译安装到 `third_party/curl-install`（该目录不会进入版本库）：
+
+```powershell
+tar -xzf third_party/curl-8.11.0.tar.gz -C third_party
+
+cmake -S third_party/curl-8.11.0 -B third_party/curl-build -G "MinGW Makefiles" `
+  -DCMAKE_C_COMPILER="$mingw/bin/gcc.exe" `
+  -DCMAKE_MAKE_PROGRAM="$mingw/bin/mingw32-make.exe" `
+  -DCMAKE_BUILD_TYPE=Release `
+  -DCMAKE_INSTALL_PREFIX="$root/third_party/curl-install" `
+  -DBUILD_SHARED_LIBS=OFF -DBUILD_CURL_EXE=OFF -DBUILD_EXAMPLES=OFF `
+  -DBUILD_TESTING=OFF -DBUILD_LIBCURL_DOCS=OFF -DBUILD_MISC_DOCS=OFF `
+  -DCURL_USE_SCHANNEL=ON -DCURL_USE_OPENSSL=OFF -DCURL_USE_LIBPSL=OFF `
+  -DUSE_NGHTTP2=OFF -DCURL_ZLIB=OFF -DCURL_BROTLI=OFF -DCURL_ZSTD=OFF `
+  -DCURL_DISABLE_LDAP=ON -DCURL_DISABLE_LDAPS=ON
+
+cmake --build third_party/curl-build --parallel
+cmake --install third_party/curl-build
+```
+
+### 4. 编译 C++ 内核
+
+```powershell
+cmake -S . -B build -G "MinGW Makefiles" `
+  -DCMAKE_C_COMPILER="$mingw/bin/gcc.exe" `
+  -DCMAKE_CXX_COMPILER="$mingw/bin/g++.exe" `
+  -DCMAKE_MAKE_PROGRAM="$mingw/bin/mingw32-make.exe" `
+  -DCMAKE_BUILD_TYPE=Release `
+  -DOPENSSL_ROOT_DIR="$mingw/opt"
+
+cmake --build build --parallel
+```
+
+若 OpenSSL 不在 `$mingw/opt`，把 `-DOPENSSL_ROOT_DIR` 指向实际安装位置。
+产物为 `build/mc_core.exe`，静态链接，仅依赖 Windows 系统 DLL。
+
+更详细的依赖说明与常见问题见 [BUILD.md](BUILD.md)。
+
+### 5. 运行源码版
+
+```powershell
+python main.py
+# 指定游戏目录
+python main.py --game-dir "<.minecraft 目录>"
+# 指定内核路径
+python main.py --exe "build/mc_core.exe"
+```
+
+源码模式下，配置与登录凭证保存在项目根目录（`launcher_config.json`、
+`account.json`、`secrets.json`、`servers.json`），均已被 `.gitignore` 忽略。
+
+### 6. 打包 exe
+
+确认 `build/mc_core.exe` 已更新，然后：
+
+```powershell
+python -m PyInstaller CoreLauncher.spec --noconfirm --clean --workpath pyinstaller-build
+```
+
+输出：`dist/CoreLauncher.exe`。打包后的程序使用 `%APPDATA%\CoreLauncher\`
+保存配置、登录信息与托管的 Java 运行时。
+
+### 7. 自测
+
+```powershell
+python tests/selftest.py
+```
+
+自测覆盖配置兼容、崩溃规则、Mod 开关与冲突、存档备份、截图索引、`.mrpack`
+解析、服务器 Ping 协议、更新脚本、Java 扫描，以及在 offscreen 平台构建主界面
+与百宝箱（不会弹出窗口）。
+
+## 使用教程
+
+### 首次启动
+
+1. 打开启动器，进入「设置 → 游戏与 Java」。
+2. 选择 `.minecraft` 游戏目录。
+3. Java 路径下拉框会自动填入本机扫描到的运行时；若没有合适的 Java，可在
+   「百宝箱 → 优化」中一键下载安装 Temurin。
+4. 点击右上角「未登录」，完成 Microsoft 正版登录（推荐且默认的启动方式）。
+
+### 安装与启动游戏
+
+1. 切换到「下载 / 安装」，输入 Mojang 官方版本号（如 `1.20.1`、`latest-release`）。
+2. 点击「开始下载」，等待进度完成；已存在的文件会自动跳过。
+3. 回到左侧「版本库」选择版本，点击底部「▶ 启动游戏」。
+
+### 百宝箱
+
+| 标签页 | 用途 |
+| --- | --- |
+| 目录与备份 | 打开常用目录、清理旧日志、手动备份存档 |
+| Mod 管理 | 启用/禁用 Mod、检测重复 ID 与缺失前置、检查 Modrinth 更新 |
+| 崩溃诊断 | 分析崩溃报告并给出修复建议；可调用 AI 深入分析 |
+| 整合包 | 导入 Modrinth `.mrpack` 整合包 |
+| 服务器 | 添加服务器、Ping 监控、一键进服 |
+| 截图 | 预览、翻阅、删除游戏截图 |
+| 优化 | 扫描/安装 Java、一键安装 Fabric + Sodium + Iris |
+
+### 整合包与服务器
+
+- **整合包**：把 `.mrpack` 拖到窗口任意位置，确认信息后点击「开始导入」。
+  导入会把文件写入当前游戏目录，并可自动安装对应 Fabric 加载器。
+- **服务器**：在「百宝箱 → 服务器」添加地址（支持 `域名:端口`），刷新状态后
+  双击条目或点击「一键进服」即可带服务器参数启动游戏。
+
+### 自动备份与在线更新
+
+- 「设置 → 自动化」可开关启动前静默备份，并设置每个存档保留的份数。
+- 同一处可填写 GitHub 仓库（`owner/repo`）以启用在线更新；Release 中需要
+  附带一个 `.exe` 文件。启动器会比对版本，下载后由 `.bat` 脚本在退出后替换
+  并重启。
+
+### AI 诊断
+
+1. 在「设置 → AI 诊断」填入 DeepSeek API Key 并保存。
+2. 打开「百宝箱 → 崩溃诊断」，点击「用 AI 分析」。
+3. 启动器会把日志片段、崩溃报告、Mod 列表与 Java/内存设置发送到
+   `api.deepseek.com`；日志中可能包含本机路径，请自行判断是否使用。
+
+## 开发者模式与离线模式风险声明
+
+> **普通玩家不需要开启离线模式。默认且唯一推荐的启动方式是 Microsoft 正版登录。**
+>
+> 本节说明的是隐藏的开发者调试入口。它不是为了方便普通用户绕过登录而设计，
+> 请勿将其理解为使用建议。本文只做风险说明，不提供开启步骤，也不建议普通
+> 用户尝试。
+
+### 入口为什么是隐藏的
+
+「设置」页底部的版本号只是版本标识。只有连续点击 7 次才会显示「开发者选项」，
+这是为了避免误触和误用。离线模式开关位于开发者选项内，默认关闭；开启时会
+弹出 EULA 风险确认，必须再次确认才会生效，确认状态会持久化到本地配置。
+
+### 离线模式是什么
+
+离线模式是开发者用于**本地技术测试**的调试功能，例如：
+
+- 在没有网络或没有正版账号的开发环境中调试界面与启动流程；
+- 单机环境下的故障排查与回归测试；
+- 启动器自身的自动化测试。
+
+它只跳过正版登录，使用本地昵称启动游戏；不提供正版联机能力，也不会绕过
+任何服务器的正版验证。使用离线身份进入服务器还可能违反该服务器的规则。
+
+### 明确风险（请完整阅读）
+
+- **离线模式不符合 Minecraft 最终用户许可协议（EULA）。**
+- **严禁**将离线模式用于：盗版联机、绕过正版验证、商业用途、内容分发、
+  公开服务器或其他任何**非测试用途**。
+- 启用离线模式产生的账号风险、法律风险与安全风险，均由使用者自行承担。
+- 启动器不会因为开启离线模式而获得任何游戏文件；缺失的游戏文件仍需通过
+  合法渠道获取。
+
+### 项目不会做的事
+
+- 不分发、不托管、不内置任何 Minecraft 客户端 JAR、资源文件、账号凭证或
+  破解补丁。
+- 不提供绕过正版验证的服务器、联机方案或启动参数。
+- 仓库中不包含任何游戏本体文件；`.gitignore` 明确排除了 `.minecraft/`、
+  `*.jar`、`libraries/`、`versions/`、`assets/objects/` 等游戏数据。
+
+### 正确的使用方式
+
+1. 使用 Microsoft 账号完成正版登录。
+2. 通过「下载 / 安装」从 Mojang 官方源安装游戏。
+3. 如果你只是想正常游玩，**请不要解锁开发者选项，也不要开启离线模式**。
+
+完整法律声明见 [DISCLAIMER.md](DISCLAIMER.md)。
+
+## 已知限制
+
+- 仅面向 Windows；C++ 代码包含少量跨平台分支，但未在其他平台完整验证。
+- 内核为 32 位进程；可启动 64 位 Java，但不支持在 32 位系统上运行 64 位 Java。
+- 整合包导入面向 Modrinth `.mrpack`：自动安装 Fabric；Quilt / Forge / NeoForge
+  需要用户自行安装加载器。
+- 一键优化会新增 `fabric-loader-…` 版本，需要在版本库中手动选择该版本启动，
+  不会改动原版启动方式。
+- 服务器 Ping 使用默认端口或显式端口，不解析 SRV 记录。
+- 在线更新只替换 `CoreLauncher.exe` 本体，不支持增量更新或回滚；源码模式下
+  只提示，不替换文件。
+- AI 诊断需要联网并消耗 DeepSeek API 配额；未配置 Key 时该功能不可用。
+- 暂不支持多实例隔离、Mod 包版本锁定与云端同步。
+
+## 编译依赖
+
+| 依赖 | 用途 | 许可 |
+| --- | --- | --- |
+| [Qt / PySide6](https://www.qt.io/qt-for-python) | 桌面界面 | LGPLv3 / GPLv3 |
+| [libcurl](https://curl.se/) | HTTP 下载（Schannel TLS） | curl License |
+| [OpenSSL](https://www.openssl.org/) | 静态加密库 | Apache-2.0 |
+| [nlohmann/json](https://github.com/nlohmann/json) | JSON 解析 | MIT |
+| [PyInstaller](https://pyinstaller.org/) | 单文件打包 | GPLv2（含例外） |
+| MinGW-w64 / GCC | C++ 编译 | GPL（运行时例外） |
+
+> 分发打包后的程序时，请遵守 Qt / PySide6 的 LGPLv3 条款，并保留上述项目的
+> 版权与许可声明。仓库内 `third_party/json.hpp` 与 curl 源码包均保留原始许可。
+
+## 项目结构
+
+```text
+CoreLauncher/
+├─ src/                       C++ 内核源码
+│  ├─ main.cpp                JSON 管道入口（scan / install / launch）
+│  ├─ http.hpp                并发下载、Range、重试、校验
+│  ├─ install.hpp             官方源安装流程
+│  ├─ launch.hpp              启动命令构建与 CreateProcess
+│  ├─ jvm_opts.hpp            内存与 JVM 参数
+│  ├─ natives.hpp             本地库识别与解压
+│  ├─ version.hpp             版本继承与规则匹配
+│  ├─ crash.hpp               崩溃日志规则
+│  └─ common.hpp              事件输出与进度节流
+├─ launcher/                  Python / PySide6 界面
+│  ├─ services/               百宝箱服务层（无 Qt 依赖）
+│  ├─ ui/toolbox/             百宝箱各标签页
+│  ├─ resources/themes/       暗黑 / 明亮 QSS 主题
+│  ├─ auth.py                 Microsoft 设备码登录
+│  ├─ account.py              DPAPI 加密的账号存储
+│  ├─ config.py               启动器配置
+│  ├─ core_client.py          C++ 内核 JSON 协议客户端
+│  └─ main_window.py          主窗口与启动流程
+├─ tests/selftest.py          服务层 + 无头界面自测
+├─ docs/screenshots/          界面截图（占位说明）
+├─ assets/                    应用图标
+├─ third_party/               json.hpp 与 curl 源码包
+├─ CMakeLists.txt             C++ 构建配置
+├─ CoreLauncher.spec          PyInstaller 配置
+├─ main.py                    Python 入口
+├─ BUILD.md                   C++ 内核构建说明
+├─ DISCLAIMER.md              免责声明
+├─ CONTRIBUTING.md            贡献指南
+└─ LICENSE                    MIT 协议
+```
+
+## 贡献指南
+
+欢迎提交 Issue 与 Pull Request。开始之前请阅读 [CONTRIBUTING.md](CONTRIBUTING.md)，
+其中包含开发环境、代码风格、提交规范与项目红线。
+
+简要约定：
+
+- **禁止**提交任何 Minecraft 游戏本体文件、破解补丁、账号凭证或绕过正版验证的代码。
+- 修改后请运行 `python tests/selftest.py`，并确保 C++ 内核可正常编译。
+- 提交信息建议使用 Conventional Commits（如 `fix: 修正高 DPI 下版本列表错位`）。
+- 涉及界面的改动请附截图，但截图需使用示例目录、不得包含个人路径或密钥。
+
+## 开源协议
+
+本项目使用 [MIT License](LICENSE) 开源。
+
+```text
+Copyright (c) 2025-2026 CoreLauncher contributors
+```
+
+你可以自由使用、修改、分发本项目的代码，但需保留版权声明与许可声明。
+第三方依赖遵循各自的许可，详见[编译依赖](#编译依赖)。
+
+## 免责声明
+
+本项目与 Mojang Studios、Microsoft Corporation 无任何关联，未获得其授权、
+认可或赞助。Minecraft、Mojang、Microsoft、Xbox 及相关名称与标识归其各自
+权利人所有。
+
+使用本软件即表示你已阅读并同意 [DISCLAIMER.md](DISCLAIMER.md)。请通过合法
+渠道购买并拥有 Minecraft 账号，遵守 Minecraft EULA 与 Microsoft 服务协议。
