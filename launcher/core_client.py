@@ -22,7 +22,7 @@ import threading
 from pathlib import Path
 from typing import Any, Iterator
 
-from .paths import app_root
+from .paths import app_root, core_path
 
 PROJECT_ROOT = app_root()
 DEFAULT_EXE = PROJECT_ROOT / "build" / "mc_core.exe"
@@ -49,7 +49,7 @@ class CoreClient:
     """Invoke ``mc_core.exe`` with a JSON payload and read its JSON events."""
 
     def __init__(self, exe_path: str | Path | None = None) -> None:
-        self.exe_path = Path(exe_path) if exe_path else DEFAULT_EXE
+        self.exe_path = Path(exe_path) if exe_path else core_path()
         self.last_returncode: int | None = None
         self.last_stderr: str = ""
         self._proc: subprocess.Popen[str] | None = None

@@ -27,6 +27,7 @@ from launcher import APP_NAME
 from launcher.config import load_config
 from launcher.core_client import CoreClient
 from launcher.main_window import MainWindow
+from launcher.paths import ensure_workspace
 from launcher.theme import apply_theme, make_app_icon
 from launcher.ui.account_dialog import shutdown_workers
 from launcher.ui.tasks import shutdown_tasks
@@ -64,6 +65,7 @@ def main(argv: list[str] | None = None) -> int:
     app.aboutToQuit.connect(shutdown_workers)
     app.aboutToQuit.connect(shutdown_tasks)
 
+    ensure_workspace()
     config = load_config()
     if args.game_dir:
         config.game_dir = str(Path(args.game_dir))

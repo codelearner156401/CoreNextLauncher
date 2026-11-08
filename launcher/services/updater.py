@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from ..constants import GITHUB_API
-from ..paths import data_dir, is_frozen
+from ..paths import cache_dir, is_frozen
 from . import net
 
 TAG_RE = re.compile(r"v?(\d+(?:\.\d+)*)", re.IGNORECASE)
@@ -149,7 +149,7 @@ def download_update(
 ) -> Path:
     if info.asset is None or not info.asset.url:
         raise UpdateError("这个 Release 没有提供 .exe 下载文件")
-    folder = data_dir() / "updates"
+    folder = cache_dir() / "updates"
     folder.mkdir(parents=True, exist_ok=True)
     target = folder / (info.asset.name or "CoreNextLauncher-new.exe")
     if target.exists():
@@ -174,7 +174,7 @@ def can_self_update() -> bool:
 
 
 def _bat_path() -> Path:
-    return Path(os.environ.get("TEMP") or str(data_dir())) / f"corenextlauncher_update_{int(time.time())}.bat"
+    return Path(os.environ.get("TEMP") or str(cache_dir())) / f"corenextlauncher_update_{int(time.time())}.bat"
 
 
 def _quote(path: Path) -> str:

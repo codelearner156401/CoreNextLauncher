@@ -84,7 +84,7 @@ inline void init_share() {
 inline void apply_common_options(CURL* c) {
     curl_easy_setopt(c, CURLOPT_FOLLOWLOCATION, 1L);
     curl_easy_setopt(c, CURLOPT_MAXREDIRS, 10L);
-    curl_easy_setopt(c, CURLOPT_USERAGENT, "CoreNextLauncher/1.3.1");
+    curl_easy_setopt(c, CURLOPT_USERAGENT, "CoreNextLauncher/1.7.0");
     curl_easy_setopt(c, CURLOPT_CONNECTTIMEOUT, 20L);
     curl_easy_setopt(c, CURLOPT_LOW_SPEED_LIMIT, 512L);
     curl_easy_setopt(c, CURLOPT_LOW_SPEED_TIME, 45L);

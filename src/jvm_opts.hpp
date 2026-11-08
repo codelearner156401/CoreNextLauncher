@@ -131,7 +131,8 @@ inline long long total_physical_mem_mb() {
 
 inline std::vector<std::string> build_jvm_opt_args(const std::string& mc_version,
                                                    const std::string& max_mem,
-                                                   const std::string& min_mem, bool optimize) {
+                                                   const std::string& min_mem, bool optimize,
+                                                   bool add_default_gc = true) {
     (void)mc_version;
     std::vector<std::string> args;
     if (!optimize) return args;
@@ -159,8 +160,12 @@ inline std::vector<std::string> build_jvm_opt_args(const std::string& mc_version
 
     args.push_back("-Xmx" + std::to_string(xmx_mb) + "M");
     args.push_back("-Xms" + std::to_string(xms_mb) + "M");
-    args.push_back("-XX:+UseG1GC");
-    args.push_back("-XX:MaxGCPauseMillis=200");
+    // The launcher UI can supply its own GC flags; in that case only the
+    // memory bounds are kept here so two collectors are never selected.
+    if (add_default_gc) {
+        args.push_back("-XX:+UseG1GC");
+        args.push_back("-XX:MaxGCPauseMillis=200");
+    }
     args.push_back("-Dfile.encoding=UTF-8");
     return args;
 }

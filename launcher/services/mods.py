@@ -57,12 +57,19 @@ class ModFile:
 @dataclass
 class ModConflictReport:
     duplicates: dict[str, list[str]] = field(default_factory=dict)
+    duplicate_files: dict[str, list[str]] = field(default_factory=dict)
     missing: list[tuple[str, str, str]] = field(default_factory=list)
+    disabled_deps: list[tuple[str, str, str]] = field(default_factory=list)
     unreadable: list[str] = field(default_factory=list)
 
     @property
     def healthy(self) -> bool:
-        return not self.duplicates and not self.missing
+        return not (
+            self.duplicates
+            or self.duplicate_files
+            or self.missing
+            or self.disabled_deps
+        )
 
 
 _META_CACHE: dict[tuple[str, int, int], dict] = {}
@@ -256,16 +263,27 @@ def load_mods(game_dir: str | Path) -> tuple[list[ModFile], Path]:
 def scan_conflicts(mods: list[ModFile], include_platform: bool = True) -> ModConflictReport:
     report = ModConflictReport()
     by_id: dict[str, list[str]] = {}
+    enabled_ids: set[str] = set()
+    by_filename: dict[str, list[str]] = {}
     for mod in mods:
+        base = mod.filename
+        if base.lower().endswith(DISABLED_SUFFIX):
+            base = base[: -len(DISABLED_SUFFIX)]
+        by_filename.setdefault(base.lower(), []).append(mod.filename)
         if mod.error or not mod.mod_id:
             if mod.error:
                 report.unreadable.append(f"{mod.filename}：{mod.error}")
             continue
         by_id.setdefault(mod.mod_id, []).append(mod.filename)
+        if mod.enabled:
+            enabled_ids.add(mod.mod_id)
     report.duplicates = {
         mod_id: names
         for mod_id, names in by_id.items()
         if len(names) > 1 and mod_id not in {"minecraft", "java"}
+    }
+    report.duplicate_files = {
+        name: files for name, files in by_filename.items() if len(files) > 1
     }
     for mod in mods:
         if mod.error or not mod.enabled:
@@ -277,6 +295,10 @@ def scan_conflicts(mods: list[ModFile], include_platform: bool = True) -> ModCon
                 continue
             if dep_id not in by_id:
                 report.missing.append((mod.mod_id or mod.display_name, dep_id, mod.filename))
+            elif dep_id not in enabled_ids:
+                report.disabled_deps.append(
+                    (mod.mod_id or mod.display_name, dep_id, mod.filename)
+                )
     return report
 
 

@@ -605,6 +605,25 @@ QListWidget#SaveList::item:selected {
     background: #1c2a44;
 }
 
+QListWidget#JvmArgsList {
+    background: #0e131c;
+    border: 1px solid #1e2635;
+    border-radius: 9px;
+    padding: 6px;
+}
+
+QListWidget#JvmArgsList::item {
+    padding: 5px 8px;
+    border-radius: 6px;
+    color: #c9d1d9;
+    font-family: "Cascadia Mono", "Consolas", monospace;
+    font-size: 11px;
+}
+
+QListWidget#JvmArgsList::item:selected {
+    background: #1c2a44;
+}
+
 QTabWidget#ToolTabs::pane {
     border: none;
 }
@@ -676,7 +695,8 @@ QLabel#VersionLabel:hover {
 
 /* --------------------------------------------------- 百宝箱 tables / cards */
 QTableWidget#ModTable,
-QTableWidget#ServerTable {
+QTableWidget#ServerTable,
+QTableWidget#InstanceTable {
     background-color: rgba(14, 19, 28, 199);
     border: 1px solid #1e2635;
     border-radius: 10px;
@@ -687,7 +707,8 @@ QTableWidget#ServerTable {
 }
 
 QTableWidget#ModTable QHeaderView::section,
-QTableWidget#ServerTable QHeaderView::section {
+QTableWidget#ServerTable QHeaderView::section,
+QTableWidget#InstanceTable QHeaderView::section {
     background-color: transparent;
     color: #7d8799;
     border: none;
@@ -698,13 +719,15 @@ QTableWidget#ServerTable QHeaderView::section {
 }
 
 QTableWidget#ModTable::item,
-QTableWidget#ServerTable::item {
+QTableWidget#ServerTable::item,
+QTableWidget#InstanceTable::item {
     padding: 5px 8px;
     border: none;
 }
 
 QTableWidget#ModTable::item:selected,
-QTableWidget#ServerTable::item:selected {
+QTableWidget#ServerTable::item:selected,
+QTableWidget#InstanceTable::item:selected {
     background: #1a2740;
 }
 

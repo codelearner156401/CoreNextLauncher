@@ -172,7 +172,7 @@ inline void init_share() {
 inline void apply_common_options(CURL* c) {
     curl_easy_setopt(c, CURLOPT_FOLLOWLOCATION, 1L);
     curl_easy_setopt(c, CURLOPT_MAXREDIRS, 10L);
-    curl_easy_setopt(c, CURLOPT_USERAGENT, "CoreNextLauncher/1.3.1");
+    curl_easy_setopt(c, CURLOPT_USERAGENT, "CoreNextLauncher/1.7.0");
     curl_easy_setopt(c, CURLOPT_CONNECTTIMEOUT, 20L);
     curl_easy_setopt(c, CURLOPT_LOW_SPEED_LIMIT, 512L);
     curl_easy_setopt(c, CURLOPT_LOW_SPEED_TIME, 45L);
@@ -967,7 +967,8 @@ inline long long total_physical_mem_mb() {
 
 inline std::vector<std::string> build_jvm_opt_args(const std::string& mc_version,
                                                    const std::string& max_mem,
-                                                   const std::string& min_mem, bool optimize) {
+                                                   const std::string& min_mem, bool optimize,
+                                                   bool add_default_gc = true) {
     (void)mc_version;
     std::vector<std::string> args;
     if (!optimize) return args;
@@ -995,8 +996,12 @@ inline std::vector<std::string> build_jvm_opt_args(const std::string& mc_version
 
     args.push_back("-Xmx" + std::to_string(xmx_mb) + "M");
     args.push_back("-Xms" + std::to_string(xms_mb) + "M");
-    args.push_back("-XX:+UseG1GC");
-    args.push_back("-XX:MaxGCPauseMillis=200");
+    // The launcher UI can supply its own GC flags; in that case only the
+    // memory bounds are kept here so two collectors are never selected.
+    if (add_default_gc) {
+        args.push_back("-XX:+UseG1GC");
+        args.push_back("-XX:MaxGCPauseMillis=200");
+    }
     args.push_back("-Dfile.encoding=UTF-8");
     return args;
 }
@@ -1042,7 +1047,8 @@ inline std::vector<std::string> build_launch_command(const json& vjson, const fs
                                                      const std::string& max_mem,
                                                      const std::string& min_mem, bool optimize,
                                                      bool offline,
-                                                     const std::vector<std::string>& extra_game_args = {}) {
+                                                     const std::vector<std::string>& extra_game_args = {},
+                                                     const std::vector<std::string>& extra_jvm_args = {}) {
     const std::string osn = os_name();
     const std::string path_sep = ";";
     std::vector<std::string> cp;
@@ -1070,10 +1076,13 @@ inline std::vector<std::string> build_launch_command(const json& vjson, const fs
         {"${auth_xuid}", account.value("xuid", "0")},
         {"${clientid}", account.value("clientid", "0")},
         {"${user_type}", account.value("user_type", "legacy")},
+        {"${user_properties}", "{}"},
+        {"${game_assets}", fs::absolute(mc_dir / "assets").u8string()},
+        {"${auth_session}", "token:" + account.value("access_token", "0") + ":" + account.value("uuid", "0")},
         {"${version_type}", vjson.value("type", "release")},
         {"${natives_directory}", fs::absolute(mc_dir / "versions" / vid / "natives").u8string()},
         {"${launcher_name}", "CoreNextLauncher"},
-        {"${launcher_version}", "1.6.0"},
+        {"${launcher_version}", "1.7.0"},
         {"${classpath}", classpath}};
     auto replace = [&](std::string s) {
         for (auto& [key, value] : ph) {
@@ -1090,16 +1099,43 @@ inline std::vector<std::string> build_launch_command(const json& vjson, const fs
     // of mc_core.exe gets the same behaviour as the Python UI.
     std::vector<std::string> cmd = {normalize_java_path(java_path)};
     if (offline) cmd.push_back("-Dminecraft.launcher.brand=CoreNextLauncher-Offline");
-    if (vjson.contains("arguments")) {
+    // Modern manifests declare arguments.jvm, including -Djava.class.path.
+    // Legacy versions (<= 1.12.2) only have minecraftArguments and need an
+    // explicit -cp, otherwise the main class cannot be found.
+    const bool modern_arguments = vjson.contains("arguments") && vjson["arguments"].is_object();
+    if (modern_arguments) {
         for (auto& a : flatten_args(vjson["arguments"].value("jvm", json::array()), osn)) {
             cmd.push_back(replace(a));
         }
+    } else {
+        // Legacy manifests do not declare -Djava.library.path; without it the
+        // extracted LWJGL DLLs are invisible and the game fails with
+        // UnsatisfiedLinkError.
+        cmd.push_back(
+            "-Djava.library.path=" +
+            fs::absolute(mc_dir / "versions" / vid / "natives").u8string());
+        cmd.push_back("-cp");
+        cmd.push_back(classpath);
     }
-    for (auto& a : build_jvm_opt_args(vid, max_mem, min_mem, optimize)) cmd.push_back(a);
+    for (auto& a : build_jvm_opt_args(vid, max_mem, min_mem, optimize, extra_jvm_args.empty())) {
+        cmd.push_back(a);
+    }
+    // User supplied JVM flags (visual editor) come after the managed memory
+    // bounds, replacing the default G1 flags when present.
+    for (const auto& extra : extra_jvm_args) {
+        cmd.push_back(extra);
+    }
     cmd.push_back(vjson["mainClass"]);
-    if (vjson.contains("arguments")) {
+    if (modern_arguments) {
         for (auto& a : flatten_args(vjson["arguments"].value("game", json::array()), osn)) {
             cmd.push_back(replace(a));
+        }
+    } else if (vjson.contains("minecraftArguments") &&
+               vjson["minecraftArguments"].is_string()) {
+        std::istringstream legacy_args(vjson["minecraftArguments"].get<std::string>());
+        std::string token;
+        while (legacy_args >> token) {
+            cmd.push_back(replace(token));
         }
     }
     // Launcher-supplied game arguments (for example --server/--port from the
@@ -1272,7 +1308,13 @@ int main(int argc, char** argv) {
                     if (item.is_string()) extra_args.push_back(item.get<std::string>());
                 }
             }
-            auto argv_list = build_launch_command(vjson, mc_dir, vid, input["account"], input.value("java_path", "java"), input.value("max_mem", "auto"), input.value("min_mem", "auto"), true, input.value("offline_mode", false), extra_args);
+            std::vector<std::string> jvm_args;
+            if (input.contains("jvm_args") && input["jvm_args"].is_array()) {
+                for (auto& item : input["jvm_args"]) {
+                    if (item.is_string()) jvm_args.push_back(item.get<std::string>());
+                }
+            }
+            auto argv_list = build_launch_command(vjson, mc_dir, vid, input["account"], input.value("java_path", "java"), input.value("max_mem", "auto"), input.value("min_mem", "auto"), true, input.value("offline_mode", false), extra_args, jvm_args);
             int code = spawn_and_wait(argv_list, mc_dir);
             event::done({{"exit_code", code}});
         } else if (cmd == "install") {

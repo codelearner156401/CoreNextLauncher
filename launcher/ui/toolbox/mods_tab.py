@@ -81,6 +81,23 @@ class ModsTab(QWidget):
         self.refresh_button.clicked.connect(lambda: self.reload())
         buttons.addWidget(self.refresh_button)
 
+        self.batch_enable_button = QPushButton("批量启用")
+        self.batch_enable_button.setObjectName("Ghost")
+        self.batch_enable_button.setEnabled(False)
+        self.batch_enable_button.clicked.connect(lambda: self._batch_set_enabled(True))
+        buttons.addWidget(self.batch_enable_button)
+
+        self.batch_disable_button = QPushButton("批量禁用")
+        self.batch_disable_button.setObjectName("DangerGhost")
+        self.batch_disable_button.setEnabled(False)
+        self.batch_disable_button.clicked.connect(lambda: self._batch_set_enabled(False))
+        buttons.addWidget(self.batch_disable_button)
+
+        self.select_all_button = QPushButton("全选")
+        self.select_all_button.setObjectName("Ghost")
+        self.select_all_button.clicked.connect(lambda: self.table.selectAll())
+        buttons.addWidget(self.select_all_button)
+
         self.conflict_button = QPushButton("冲突检测")
         self.conflict_button.clicked.connect(self.check_conflicts)
         buttons.addWidget(self.conflict_button)
@@ -112,7 +129,7 @@ class ModsTab(QWidget):
         self.table.setHorizontalHeaderLabels(COLUMNS)
         self.table.verticalHeader().setVisible(False)
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table.setAlternatingRowColors(False)
         self.table.setShowGrid(False)
@@ -125,11 +142,12 @@ class ModsTab(QWidget):
             header.setSectionResizeMode(column, QHeaderView.ResizeMode.ResizeToContents)
         header.setSectionResizeMode(6, QHeaderView.ResizeMode.Stretch)
         self.table.itemChanged.connect(self._on_item_changed)
+        self.table.itemSelectionChanged.connect(self._update_batch_buttons)
         self.table.cellDoubleClicked.connect(self._open_selected_file)
         layout.addWidget(self.table, 1)
 
         hint = QLabel(
-            "提示：启动游戏时请选择与这些 Mod 匹配的加载器版本（例如 Fabric）。"
+            "提示：按住 Ctrl / Shift 可以多选，再用“批量启用 / 批量禁用”一次处理多个 Mod。"
             "双击某一行可以在资源管理器中定位该 jar。"
         )
         hint.setObjectName("Hint")
@@ -299,6 +317,57 @@ class ModsTab(QWidget):
         else:
             self.summary.setToolTip("")
 
+    # ---------------------------------------------------------- batch toggle
+    def _selected_rows(self) -> list[int]:
+        rows = {index.row() for index in self.table.selectionModel().selectedRows()}
+        return sorted(row for row in rows if not self.table.isRowHidden(row))
+
+    def _update_batch_buttons(self) -> None:
+        enabled = bool(self._selected_rows())
+        self.batch_enable_button.setEnabled(enabled)
+        self.batch_disable_button.setEnabled(enabled)
+
+    def _batch_set_enabled(self, enabled: bool) -> None:
+        rows = self._selected_rows()
+        if not rows:
+            QMessageBox.information(
+                self,
+                "未选择 Mod",
+                "请先在列表中选中一个或多个 Mod（按住 Ctrl / Shift 多选）。",
+            )
+            return
+        changed = 0
+        skipped = 0
+        failed: list[str] = []
+        for row in rows:
+            item = self.table.item(row, 0)
+            raw = item.data(Qt.ItemDataRole.UserRole) if item is not None else None
+            if not raw:
+                continue
+            current = item.checkState() == Qt.CheckState.Checked
+            if current == enabled:
+                skipped += 1
+                continue
+            try:
+                mods_service.set_mod_enabled(str(raw), enabled)
+                changed += 1
+            except (OSError, FileExistsError) as exc:
+                failed.append(f"{Path(str(raw)).name}：{exc}")
+        action = "启用" if enabled else "禁用"
+        self.log_requested.emit(
+            "success" if not failed else "warn",
+            f"批量{action}完成：{changed} 个已{action}"
+            + (f"，{skipped} 个无需变更" if skipped else "")
+            + (f"，{len(failed)} 个失败" if failed else ""),
+        )
+        if failed:
+            QMessageBox.warning(
+                self,
+                "部分 Mod 处理失败",
+                f"{len(failed)} 个 Mod 无法{action}：\n" + "\n".join(failed[:10]),
+            )
+        self.reload(silent=True)
+
     # -------------------------------------------------------------- toggle
     def _on_item_changed(self, item: QTableWidgetItem) -> None:
         if self._updating or item.column() != 0:
@@ -381,12 +450,17 @@ class ModsTab(QWidget):
         report = mods_service.scan_conflicts(self._mods)
         lines: list[str] = [f"扫描 {len(self._mods)} 个 Mod："]
         if report.healthy:
-            lines.append("没有发现重复 Mod ID 或缺失前置。")
+            lines.append("没有发现重复 Mod、重复文件或缺失前置。")
         if report.duplicates:
             lines.append("")
             lines.append(f"重复 Mod ID（{len(report.duplicates)} 个）：")
             for mod_id, names in sorted(report.duplicates.items()):
                 lines.append(f"  · {mod_id}：{', '.join(sorted(names))}")
+        if report.duplicate_files:
+            lines.append("")
+            lines.append(f"同名文件（{len(report.duplicate_files)} 组）：")
+            for _name, names in sorted(report.duplicate_files.items()):
+                lines.append(f"  · {', '.join(sorted(names))}")
         if report.missing:
             lines.append("")
             lines.append(f"缺失前置（{len(report.missing)} 条）：")
@@ -394,6 +468,11 @@ class ModsTab(QWidget):
                 lines.append(f"  · {owner} 需要 {dep}（来自 {jar}）")
             if len(report.missing) > 40:
                 lines.append(f"  … 另有 {len(report.missing) - 40} 条")
+        if report.disabled_deps:
+            lines.append("")
+            lines.append(f"前置已安装但被禁用（{len(report.disabled_deps)} 条）：")
+            for owner, dep, jar in report.disabled_deps[:20]:
+                lines.append(f"  · {owner} 需要 {dep}，但该前置当前处于禁用状态（来自 {jar}）")
         if report.unreadable:
             lines.append("")
             lines.append("无法识别的 jar：")
@@ -413,7 +492,8 @@ class ModsTab(QWidget):
         box.setInformativeText(
             f"已检查 {len(self._mods)} 个 Mod。"
             + (
-                f"重复 ID {len(report.duplicates)} 个，缺失前置 {len(report.missing)} 条。"
+                f"重复 ID {len(report.duplicates)} 个，同名文件 {len(report.duplicate_files)} 组，"
+                f"缺失前置 {len(report.missing)} 条，前置被禁用 {len(report.disabled_deps)} 条。"
                 if not report.healthy
                 else ""
             )

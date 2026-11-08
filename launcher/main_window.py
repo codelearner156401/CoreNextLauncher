@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import time
 from pathlib import Path
 
@@ -28,14 +29,17 @@ from .config import AppConfig, save_config
 from .constants import DEFAULT_MS_CLIENT_ID
 from .core_client import CoreClient
 from .java import normalize_java_path
+from .paths import ensure_workspace, workspace_root
 from .services import backup as backup_service
 from .services import crash as crash_service
 from .services import java_install
+from .services import java_scan
 from .services import updater
 from .theme import THEME_LABELS, apply_theme, apply_window_effects
 from .ui.account_dialog import AccountDialog
 from .ui.crash_dialog import CrashDialog
 from .ui.glass import BackgroundWidget, GlassFrame
+from .ui.instance_page import InstancePage
 from .ui.pages import InstallPage, LogPage, SettingsPage
 from .ui.tasks import cancel_tasks, start_task
 from .ui.toolbox import ModpackImportDialog, ToolboxPage
@@ -55,6 +59,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.client = client
         self.config = config
+        self.workspace = ensure_workspace()
         # Developer mode and offline login are session-only: wipe them before
         # any UI exists, so a stale state file or a killed process cannot
         # re-enable them on the next start.
@@ -101,10 +106,13 @@ class MainWindow(QMainWindow):
         self.tabs = AnimatedTabView()
         self.settings_page = SettingsPage(config)
         self.settings_page.apply_developer_state(self.dev_state)
+        self.instance_page = InstancePage()
+        self.instance_page.set_active_dir(config.game_dir)
         self.install_page = InstallPage()
         self.toolbox_page = ToolboxPage(self, config.game_dir)
         self.log_page = LogPage()
         self.tabs.addTab(self.settings_page, "设置")
+        self.tabs.addTab(self.instance_page, "实例")
         self.tabs.addTab(self.install_page, "下载 / 安装")
         self.tabs.addTab(self.toolbox_page, "百宝箱")
         self.tabs.addTab(self.log_page, "日志")
@@ -132,6 +140,7 @@ class MainWindow(QMainWindow):
         self._refresh_kernel(log=True)
         self.log_page.log("info", "CoreNextLauncher UI 已启动")
         self.log_page.log("muted", f"版本 {APP_VERSION} · PySide6 + 液态玻璃界面")
+        self.log_page.log("muted", f"工作区：{workspace_root()}")
         self.log_page.log(
             "muted", "开发者模式与离线登录已在本次启动时重置为关闭（仅本次运行可临时开启）"
         )
@@ -277,6 +286,8 @@ class MainWindow(QMainWindow):
         self.settings_page.developer_state_changed.connect(
             self._on_developer_state_changed
         )
+        self.instance_page.log_requested.connect(self.log_page.log)
+        self.instance_page.instance_changed.connect(self._on_instance_changed)
 
     def _install_shortcuts(self) -> None:
         refresh = QAction(self)
@@ -460,6 +471,8 @@ class MainWindow(QMainWindow):
                 "muted", f"Java 路径已自动补全：{configured_java} → {java_path}"
             )
         java_path = self._resolve_java(data, java_path)
+        if not java_path:
+            return
         if not Path(java_path).is_file():
             self.log_page.log("warn", f"Java 路径不存在：{java_path}")
             if self._offer_java_install(java_path, data, version_id):
@@ -498,6 +511,7 @@ class MainWindow(QMainWindow):
             "max_mem": values["max_mem"],
             "min_mem": values["min_mem"],
             "offline_mode": offline,
+            "jvm_args": values.get("jvm_args", []),
         }
         if server is not None:
             payload["extra_game_args"] = [
@@ -578,7 +592,13 @@ class MainWindow(QMainWindow):
         worker.start()
 
     # --------------------------------------------------------- auto java setup
-    def _offer_java_install(self, java_path: str, version_data: dict, version_id: str) -> bool:
+    def _offer_java_install(
+        self,
+        java_path: str,
+        version_data: dict,
+        version_id: str,
+        required_major: int = 0,
+    ) -> bool:
         if not self.config.auto_java_install:
             return False
         manifest = version_data.get("raw") if isinstance(version_data.get("raw"), dict) else {}
@@ -587,12 +607,13 @@ class MainWindow(QMainWindow):
             major = int(meta.get("majorVersion") or 0)
         except (TypeError, ValueError):
             major = 0
-        major = major or java_install.suggested_major(version_id)
+        major = required_major or major or java_install.suggested_major(version_id)
         answer = QMessageBox.question(
             self,
-            "缺少 Java 运行时",
-            f"没有找到可用的 Java：\n{java_path}\n\n"
-            f"是否从 Adoptium 自动下载安装 Temurin {major} 并设为启动 Java？\n"
+            "缺少匹配的 Java 运行时",
+            f"当前 Java 不可用或版本不匹配：\n{java_path}\n\n"
+            f"该版本需要 Java {major}。是否从 Adoptium 自动下载安装 "
+            f"Temurin {major} 并设为启动 Java？\n"
             "（约 180 MB，需要联网，安装后自动填入设置）",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.Yes,
@@ -683,6 +704,16 @@ class MainWindow(QMainWindow):
         self.settings_page.set_java_path(path)
         self._save_config(silent=True)
         self.log_page.log("success", f"启动 Java 已设为：{path}")
+
+    def _on_instance_changed(self, path: str) -> None:
+        if not path:
+            return
+        self.settings_page.set_game_dir(path)
+        self._save_config(silent=True)
+        self.toolbox_page.set_game_dir(path)
+        self.instance_page.set_active_dir(path)
+        self.log_page.log("success", f"已切换实例：{path}")
+        self.refresh_versions()
 
     # -------------------------------------------------------------- updates
     def _maybe_auto_check_update(self) -> None:
@@ -779,23 +810,55 @@ class MainWindow(QMainWindow):
         )
         dialog.exec()
 
-    def _resolve_java(self, version_data: dict, configured: str) -> str:
-        """Pick the runtime a version declares when a sibling runtime exists.
+    @staticmethod
+    def _required_java_major(version_data: dict, version_id: str) -> int:
+        manifest = version_data.get("raw")
+        if isinstance(manifest, dict):
+            meta = manifest.get("javaVersion")
+            if isinstance(meta, dict):
+                try:
+                    major = int(meta.get("majorVersion") or 0)
+                except (TypeError, ValueError):
+                    major = 0
+                if major:
+                    return major
+        match = re.search(r"(1\.\d+(?:\.\d+)?)", version_id or "")
+        if not match:
+            match = re.match(r"(\d+\.\d+(?:\.\d+)?)", version_id or "")
+        if match:
+            return java_install.suggested_major(match.group(1))
+        return 0
 
-        Minecraft 26.x needs Java 25 (``java-runtime-epsilon``); pointing at
-        an older runtime makes the JVM reject its own arguments (exit 1).
-        """
+    @staticmethod
+    def _java_compatible(required: int, actual: int) -> bool:
+        if not required or not actual:
+            return True
+        if required <= 8:
+            return actual == required
+        if required == 16:
+            return actual in (16, 17)
+        # Java 17+ runtimes can usually run versions that only require 17.
+        return actual >= required
+
+    def _resolve_java(self, version_data: dict, configured: str) -> str:
+        """Pick a runtime that matches the Java major the version expects."""
         manifest = version_data.get("raw")
         meta = manifest.get("javaVersion") if isinstance(manifest, dict) else None
-        if not isinstance(meta, dict):
-            return configured
-        component = str(meta.get("component") or "")
-        major = meta.get("majorVersion")
-        if not component:
-            return configured
+        component = ""
+        major = 0
+        if isinstance(meta, dict):
+            component = str(meta.get("component") or "")
+            try:
+                major = int(meta.get("majorVersion") or 0)
+            except (TypeError, ValueError):
+                major = 0
         path = Path(configured)
         try:
-            if path.parent.name.lower() == "bin" and path.parent.parent.name.startswith("java-runtime-"):
+            if (
+                component
+                and path.parent.name.lower() == "bin"
+                and path.parent.parent.name.startswith("java-runtime-")
+            ):
                 runtime_root = path.parent.parent.parent
                 exe_name = "javaw.exe" if path.name.lower() == "javaw.exe" else "java.exe"
                 candidate = runtime_root / component / "bin" / exe_name
@@ -804,9 +867,43 @@ class MainWindow(QMainWindow):
                         "info",
                         f"版本要求 Java {major or ''}（{component}），已自动切换运行时：{candidate}",
                     )
-                    return str(candidate)
+                    configured = str(candidate)
+                    path = candidate
         except OSError:
             pass
+
+        required = self._required_java_major(
+            version_data, str(version_data.get("id", ""))
+        )
+        if not required or not path.is_file():
+            return configured
+        install = java_scan.probe_java(path)
+        if install is None or not install.major:
+            return configured
+        if self._java_compatible(required, install.major):
+            return configured
+
+        self.log_page.log(
+            "warn",
+            f"该版本需要 Java {required}，当前为 Java {install.major}，正在查找本机运行时…",
+        )
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            installs = java_scan.scan_java(str(self.settings_page.values().get("game_dir", "")) or None)
+        finally:
+            QApplication.restoreOverrideCursor()
+        match = java_scan.find_by_major(installs, required)
+        if match is not None:
+            self.log_page.log(
+                "info", f"已自动切换 Java：{match.path}（Java {match.major}）"
+            )
+            return match.path
+
+        self.log_page.log("warn", f"没有找到 Java {required}。")
+        if self._offer_java_install(
+            str(path), version_data, str(version_data.get("id", "")), required
+        ):
+            return ""
         return configured
 
     # -------------------------------------------------------------- install
@@ -1063,6 +1160,7 @@ class MainWindow(QMainWindow):
         self._launch_reported = True
         self.log_page.log("error", f"内核调用失败：{message}")
         self._set_running(False)
+        QTimer.singleShot(600, self._analyze_crash_after_failure)
 
     def _launch_worker_finished(self, worker: LaunchWorker) -> None:
         if self._launch_worker is worker:
@@ -1151,6 +1249,7 @@ class MainWindow(QMainWindow):
         self.log_page.log("success", "设置已保存。")
         self.log_page.log("muted", f"游戏目录：{values.get('game_dir', '')}")
         self.toolbox_page.set_game_dir(values.get("game_dir", ""))
+        self.instance_page.set_active_dir(values.get("game_dir", ""))
         self.refresh_versions()
 
     def _on_developer_unlocked(self) -> None:

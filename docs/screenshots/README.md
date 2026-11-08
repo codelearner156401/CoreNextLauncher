@@ -5,6 +5,8 @@
 
 - `docs/screenshots/main-dark.png` — 主界面（暗黑 + 液态玻璃）
 - `docs/screenshots/main-light.png` — 主界面（明亮）
+- `docs/screenshots/instances.png` — 实例管理
+- `docs/screenshots/settings-jvm.png` — JVM 参数编辑器
 - `docs/screenshots/toolbox-mods.png` — 百宝箱 · Mod 管理
 - `docs/screenshots/toolbox-diagnose.png` — 百宝箱 · 崩溃诊断
 - `docs/screenshots/toolbox-servers.png` — 百宝箱 · 服务器监控

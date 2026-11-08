@@ -10,8 +10,10 @@ the Minecraft server ping is answered by a tiny in-process server.
 
 from __future__ import annotations
 
+import atexit
 import json
 import os
+import shutil
 import socket
 import struct
 import sys
@@ -25,11 +27,24 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+_TEST_HOME = tempfile.mkdtemp(prefix="cnl-selftest-")
+atexit.register(shutil.rmtree, _TEST_HOME, True)
+os.environ["CORENEXTLAUNCHER_HOME"] = _TEST_HOME
 
-from launcher import APP_VERSION, dev_state
+from launcher import APP_VERSION, dev_state, paths
 from launcher.config import CONFIG_PATH, AppConfig, load_config, save_config
 from launcher.dev_state import STATE_PATH as DEV_STATE_PATH
-from launcher.services import backup, crash, modpack, mods, screenshots, servers, updater
+from launcher.services import (
+    backup,
+    crash,
+    instances,
+    jvm,
+    modpack,
+    mods,
+    screenshots,
+    servers,
+    updater,
+)
 
 FAILURES: list[str] = []
 
@@ -150,6 +165,103 @@ def test_config(root: Path) -> None:
         and "offline_ack" not in keys
         and "developer_unlocked" not in keys,
     )
+    check(
+        "jvm defaults",
+        loaded.jvm_preset == "auto" and loaded.jvm_args == [],
+        f"{loaded.jvm_preset} {loaded.jvm_args}",
+    )
+    jvm_config = AppConfig(
+        jvm_preset="g1",
+        jvm_args=["-XX:+UseG1GC", " -XX:+UseG1GC ", "", "-Xss4M"],
+    ).normalized()
+    check(
+        "jvm args sanitised",
+        jvm_config.jvm_args == ["-XX:+UseG1GC", "-Xss4M"],
+        str(jvm_config.jvm_args),
+    )
+    check("invalid jvm preset falls back", AppConfig(jvm_preset="bogus").normalized().jvm_preset == "auto")
+
+
+def test_workspace() -> None:
+    print("workspace")
+    workspace = paths.ensure_workspace()
+    check("workspace uses env override", str(workspace.root) == _TEST_HOME, str(workspace.root))
+    for name, folder in (
+        ("config", workspace.config),
+        ("kernel", workspace.kernel),
+        ("instances", workspace.instances),
+        ("cache", workspace.cache),
+        ("logs", workspace.logs),
+        ("exports", workspace.exports),
+    ):
+        check(f"workspace {name} dir", folder.is_dir(), str(folder))
+    check(
+        "default instance created",
+        (workspace.instances / "default").is_dir(),
+        str(workspace.instances),
+    )
+    kernel = paths.deploy_kernel()
+    has_source = (paths.app_root() / "build" / "mc_core.exe").is_file()
+    check("kernel deployed", kernel.is_file() or not has_source, str(kernel))
+
+
+def test_instances(game: Path) -> None:
+    print("instances")
+    paths.ensure_workspace()
+    source = instances.create_instance("clone-source")
+    (source / "versions" / "1.20.1").mkdir(parents=True, exist_ok=True)
+    (source / "versions" / "1.20.1" / "1.20.1.json").write_text(
+        json.dumps({"id": "1.20.1"}), encoding="utf-8"
+    )
+    make_mod_jar(source / "mods" / "sodium.jar", "sodium", "Sodium", "0.5.13")
+    (source / "saves" / "world").mkdir(parents=True, exist_ok=True)
+    (source / "saves" / "world" / "level.dat").write_bytes(b"level")
+    (source / "logs").mkdir(parents=True, exist_ok=True)
+    (source / "logs" / "latest.log").write_text("log", encoding="utf-8")
+
+    cloned = instances.clone_instance(source, "clone-full", include_saves=True)
+    check("clone versions copied", (cloned / "versions" / "1.20.1" / "1.20.1.json").is_file())
+    check("clone mods copied", (cloned / "mods" / "sodium.jar").is_file())
+    check("clone saves copied", (cloned / "saves" / "world" / "level.dat").is_file())
+    check("clone skips logs", not (cloned / "logs").exists())
+
+    lite = instances.clone_instance(source, "clone-lite", include_saves=False)
+    check("clone without saves", not (lite / "saves").exists())
+    check("clone still copies mods", (lite / "mods" / "sodium.jar").is_file())
+
+    names = {item.name for item in instances.list_instances()}
+    check("instances listed", {"clone-source", "clone-full", "clone-lite"} <= names, str(names))
+    instances.delete_instance("clone-full")
+    instances.delete_instance("clone-lite")
+    instances.delete_instance("clone-source")
+    check("instance deleted", not (instances.root_dir() / "clone-full").exists())
+
+
+def test_jvm() -> None:
+    print("jvm recommendation")
+    cases = (
+        (8192, 4096, 1024),
+        (16384, 6144, 1536),
+        (32768, 8192, 2048),
+        (65536, 16384, 4096),
+    )
+    for total, max_mb, min_mb in cases:
+        advice = jvm.recommend_memory(total)
+        check(
+            f"memory advice for {total} MB",
+            (advice.max_mb, advice.min_mb) == (max_mb, min_mb),
+            f"{advice.max_mb}/{advice.min_mb}",
+        )
+    check("g1 preset args", "-XX:+UseG1GC" in jvm.preset_args("g1"))
+    check("zgc preset args", jvm.preset_args("zgc") == ["-XX:+UseZGC"])
+    check("auto preset empty", jvm.preset_args("auto") == [])
+    check(
+        "preset detection",
+        jvm.preset_for_args(["-XX:+UseZGC"]) == "zgc"
+        and jvm.preset_for_args(["-XX:+UseG1GC", "-XX:+AlwaysPreTouch"]) == "performance",
+    )
+    check("sanitize drops newlines", jvm.sanitize_args(["-Xmx4G\n", "-Xss4M"]) == ["-Xss4M"])
+    check("sanitize caps duplicates", jvm.sanitize_args(["-Xss4M", "-Xss4M"]) == ["-Xss4M"])
 
 
 def test_dev_state(root: Path) -> None:
@@ -402,9 +514,9 @@ def test_servers() -> None:
 
 def test_updater() -> None:
     print("updater")
-    check("version parse", updater.parse_version("v1.6.0") == (1, 6, 0))
+    check("version parse", updater.parse_version("v1.7.0") == (1, 7, 0))
     check("newer detected", updater.is_newer("v1.10.0", "1.9.9"))
-    check("same not newer", not updater.is_newer("v1.6.0", APP_VERSION))
+    check("same not newer", not updater.is_newer("v1.7.0", APP_VERSION))
     check("older not newer", not updater.is_newer("v1.0.0", APP_VERSION))
     asset = updater._pick_asset(
         [
@@ -486,7 +598,7 @@ def test_ui(root: Path) -> None:
     for _ in range(25):
         app.processEvents()
         time.sleep(0.03)
-    check("main tabs", window.tabs.count() == 4)
+    check("main tabs", window.tabs.count() == 5)
     check(
         "developer/offline reset on startup",
         not window.dev_state.developer_unlocked
@@ -494,13 +606,34 @@ def test_ui(root: Path) -> None:
     )
     check("developer card hidden at startup", window.settings_page.dev_card.isHidden())
     window.toolbox_page.set_game_dir(str(game))
-    window.tabs.setCurrentIndex(2)
+    window.tabs.setCurrentIndex(3)
     for index in range(window.toolbox_page.tabs.count()):
         window.toolbox_page.tabs.setCurrentIndex(index)
         for _ in range(12):
             app.processEvents()
             time.sleep(0.03)
     check("mods table rows", window.toolbox_page.mods_tab.table.rowCount() == 2)
+    mods_tab = window.toolbox_page.mods_tab
+    mods_tab.table.selectAll()
+    mods_tab._batch_set_enabled(False)
+    for _ in range(20):
+        app.processEvents()
+        time.sleep(0.03)
+    check(
+        "batch disable renames every mod",
+        len(list((game / "mods").glob("*.jar.disabled"))) == 2,
+        str(list((game / "mods").iterdir())),
+    )
+    mods_tab.table.selectAll()
+    mods_tab._batch_set_enabled(True)
+    for _ in range(20):
+        app.processEvents()
+        time.sleep(0.03)
+    check(
+        "batch enable restores every mod",
+        len(list((game / "mods").glob("*.jar"))) == 2,
+        str(list((game / "mods").iterdir())),
+    )
     check("saves listed", window.toolbox_page.shortcuts_tab.save_list.count() == 1)
     check("screenshots loaded", len(window.toolbox_page.screenshots_tab.items) == 1)
     check(
@@ -508,6 +641,14 @@ def test_ui(root: Path) -> None:
         "crash" in window.toolbox_page.diagnose_tab.report_info.text(),
         window.toolbox_page.diagnose_tab.report_info.text(),
     )
+    check("instance page lists default", window.instance_page.table.rowCount() >= 1)
+    window.settings_page._optimize_memory()
+    check(
+        "memory recommendation applied",
+        window.settings_page.max_mem_combo.currentText().endswith("M"),
+        window.settings_page.max_mem_combo.currentText(),
+    )
+    check("jvm editor populated", window.settings_page.jvm_args_list.count() >= 1)
     for _ in range(7):
         window.settings_page._on_version_clicked()
     for _ in range(3):
@@ -551,6 +692,9 @@ def main() -> int:
         root = Path(temp)
         game = build_game_dir(root)
         test_config(root)
+        test_workspace()
+        test_instances(game)
+        test_jvm()
         test_dev_state(root)
         test_crash(game)
         test_mods(game)

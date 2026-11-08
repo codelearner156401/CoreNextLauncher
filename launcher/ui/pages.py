@@ -18,6 +18,8 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QListWidget,
+    QListWidgetItem,
     QMessageBox,
     QPushButton,
     QScrollArea,
@@ -34,6 +36,7 @@ from ..constants import APP_NAME, APP_VERSION
 from ..dev_state import DeveloperState
 from ..services import ai_diag
 from ..services import java_scan
+from ..services import jvm
 from .tasks import start_task
 from .widgets import (
     TYPE_LABELS,
@@ -194,6 +197,7 @@ class SettingsPage(QWidget):
         scroll.setWidget(inner)
 
         layout.addWidget(self._build_game_card())
+        layout.addWidget(self._build_jvm_card())
         layout.addWidget(self._build_account_card())
         layout.addWidget(self._build_appearance_card())
         layout.addWidget(self._build_automation_card())
@@ -253,7 +257,7 @@ class SettingsPage(QWidget):
         form.setVerticalSpacing(9)
 
         self.game_dir_edit = QLineEdit()
-        self.game_dir_edit.setPlaceholderText("例如 %APPDATA%\\.minecraft")
+        self.game_dir_edit.setPlaceholderText("例如 文档\\CoreNextLauncher\\instances\\default")
         form.addRow(_field("游戏目录"), self._path_row(self.game_dir_edit, "浏览…", self._browse_game_dir))
 
         self.java_combo = QComboBox()
@@ -308,12 +312,257 @@ class SettingsPage(QWidget):
         self.mem_optimize = QPushButton("一键智能内存优化")
         self.mem_optimize.clicked.connect(self._optimize_memory)
         optimize_row.addWidget(self.mem_optimize)
-        self.memory_hint = QLabel("按物理总内存的 1/2 设置 Xmx，1/4 设置 Xms")
+        self.memory_hint = QLabel("根据物理内存自动推荐 Xmx / Xms，并预留系统占用")
         self.memory_hint.setObjectName("Hint")
         self.memory_hint.setWordWrap(True)
         optimize_row.addWidget(self.memory_hint, 1)
         layout.addLayout(optimize_row)
         return card
+
+    def _build_jvm_card(self) -> QFrame:
+        card, layout = _card(
+            "JVM 参数 · 可视化",
+            "内存与垃圾回收参数会随启动传给 C++ 内核；不确定时保持“自动（内核默认）”。",
+        )
+        preset_row = QHBoxLayout()
+        preset_row.setSpacing(10)
+        preset_row.addWidget(_field("预设"))
+        self.jvm_preset_combo = QComboBox()
+        for key in jvm.PRESET_ORDER:
+            self.jvm_preset_combo.addItem(jvm.PRESET_LABELS[key], key)
+        self.jvm_preset_combo.setMinimumWidth(240)
+        self.jvm_preset_combo.currentIndexChanged.connect(self._on_jvm_preset_changed)
+        preset_row.addWidget(self.jvm_preset_combo)
+        self.jvm_recommend_button = QPushButton("按硬件推荐")
+        self.jvm_recommend_button.setObjectName("Primary")
+        self.jvm_recommend_button.clicked.connect(self._recommend_jvm)
+        preset_row.addWidget(self.jvm_recommend_button)
+        preset_row.addStretch(1)
+        layout.addLayout(preset_row)
+
+        flags = QHBoxLayout()
+        flags.setSpacing(12)
+        self.jvm_g1_check = QCheckBox("G1GC（通用）")
+        self.jvm_zgc_check = QCheckBox("ZGC（低延迟，Java 17+）")
+        self.jvm_pretouch_check = QCheckBox("预触碰堆内存")
+        self.jvm_parallel_check = QCheckBox("并行引用处理")
+        self.jvm_utf8_check = QCheckBox("强制 UTF-8")
+        self.jvm_utf8_check.setChecked(True)
+        for widget in (
+            self.jvm_g1_check,
+            self.jvm_zgc_check,
+            self.jvm_pretouch_check,
+            self.jvm_parallel_check,
+            self.jvm_utf8_check,
+        ):
+            widget.toggled.connect(self._on_jvm_flag_toggled)
+            flags.addWidget(widget)
+        flags.addStretch(1)
+        layout.addLayout(flags)
+
+        args_row = QHBoxLayout()
+        args_row.setSpacing(8)
+        self.jvm_args_list = QListWidget()
+        self.jvm_args_list.setObjectName("JvmArgsList")
+        self.jvm_args_list.setMaximumHeight(120)
+        args_row.addWidget(self.jvm_args_list, 1)
+
+        side = QVBoxLayout()
+        side.setSpacing(6)
+        self.jvm_arg_edit = QLineEdit()
+        self.jvm_arg_edit.setPlaceholderText("追加参数，例如 -XX:+UseCompactObjectHeaders")
+        self.jvm_arg_edit.returnPressed.connect(self._add_jvm_arg)
+        side.addWidget(self.jvm_arg_edit)
+        arg_buttons = QHBoxLayout()
+        arg_buttons.setSpacing(6)
+        add_arg = QPushButton("添加参数")
+        add_arg.setObjectName("Ghost")
+        add_arg.clicked.connect(self._add_jvm_arg)
+        arg_buttons.addWidget(add_arg)
+        remove_arg = QPushButton("删除选中")
+        remove_arg.setObjectName("Ghost")
+        remove_arg.clicked.connect(self._remove_jvm_arg)
+        arg_buttons.addWidget(remove_arg)
+        arg_buttons.addStretch(1)
+        side.addLayout(arg_buttons)
+        args_row.addLayout(side)
+        layout.addLayout(args_row)
+
+        self.jvm_hint = QLabel("")
+        self.jvm_hint.setObjectName("Hint")
+        self.jvm_hint.setWordWrap(True)
+        layout.addWidget(self.jvm_hint)
+
+        self._jvm_loading = False
+        self._custom_jvm_args: list[str] = []
+        self._sync_jvm_display()
+        return card
+
+    # ------------------------------------------------------------- JVM editor
+    def _effective_jvm_args(self) -> list[str]:
+        return jvm.arguments_from_flags(
+            g1=self.jvm_g1_check.isChecked(),
+            zgc=self.jvm_zgc_check.isChecked(),
+            pretouch=self.jvm_pretouch_check.isChecked(),
+            parallel_ref=self.jvm_parallel_check.isChecked(),
+            utf8=self.jvm_utf8_check.isChecked(),
+            extra=self._custom_jvm_args,
+        )
+
+    def _sync_jvm_display(self) -> None:
+        args = self._effective_jvm_args()
+        self.jvm_args_list.clear()
+        if args:
+            for arg in args:
+                self.jvm_args_list.addItem(arg)
+            self.jvm_hint.setText(
+                f"当前 {len(args)} 个参数，将追加到启动命令；留空表示使用内核默认（G1GC）。"
+            )
+        else:
+            item = QListWidgetItem("（使用内核默认 JVM 参数）")
+            item.setFlags(Qt.ItemFlag.NoItemFlags)
+            self.jvm_args_list.addItem(item)
+            self.jvm_hint.setText("留空表示使用内核默认（G1GC）。")
+
+    def _on_jvm_preset_changed(self, _index: int = -1) -> None:
+        if self._jvm_loading:
+            return
+        key = str(self.jvm_preset_combo.currentData() or "auto")
+        if key == "custom":
+            return
+        self._jvm_loading = True
+        try:
+            self.jvm_g1_check.setChecked(key in {"g1", "performance"})
+            self.jvm_zgc_check.setChecked(key == "zgc")
+            self.jvm_pretouch_check.setChecked(key == "performance")
+            self.jvm_parallel_check.setChecked(key in {"g1", "performance"})
+            self.jvm_utf8_check.setChecked(key != "auto")
+            self._custom_jvm_args = []
+        finally:
+            self._jvm_loading = False
+        self._sync_jvm_display()
+
+    def _on_jvm_flag_toggled(self, checked: bool) -> None:
+        if self._jvm_loading:
+            return
+        sender = self.sender()
+        self._jvm_loading = True
+        try:
+            if sender is self.jvm_g1_check and checked:
+                self.jvm_zgc_check.setChecked(False)
+            elif sender is self.jvm_zgc_check and checked:
+                self.jvm_g1_check.setChecked(False)
+                self.jvm_parallel_check.setChecked(False)
+        finally:
+            self._jvm_loading = False
+        args = self._effective_jvm_args()
+        detected = jvm.preset_for_args(args)
+        self.jvm_preset_combo.blockSignals(True)
+        index = self.jvm_preset_combo.findData(detected)
+        if index < 0:
+            index = self.jvm_preset_combo.findData("custom")
+        self.jvm_preset_combo.setCurrentIndex(max(0, index))
+        self.jvm_preset_combo.blockSignals(False)
+        self._sync_jvm_display()
+
+    def _add_jvm_arg(self) -> None:
+        text = self.jvm_arg_edit.text().strip()
+        cleaned = jvm.sanitize_args([text])
+        if not cleaned:
+            QMessageBox.information(self, "参数无效", "请输入一个有效的 JVM 参数（不含换行）。")
+            return
+        value = cleaned[0]
+        if value in self._effective_jvm_args():
+            QMessageBox.information(self, "参数已存在", f"{value} 已经在参数列表中。")
+            return
+        self._custom_jvm_args.append(value)
+        self.jvm_arg_edit.clear()
+        self.jvm_preset_combo.blockSignals(True)
+        index = self.jvm_preset_combo.findData("custom")
+        if index >= 0:
+            self.jvm_preset_combo.setCurrentIndex(index)
+        self.jvm_preset_combo.blockSignals(False)
+        self._sync_jvm_display()
+
+    def _remove_jvm_arg(self) -> None:
+        item = self.jvm_args_list.currentItem()
+        if item is None or not (item.flags() & Qt.ItemFlag.ItemIsEnabled):
+            return
+        text = item.text()
+        known = {
+            "-XX:+UseG1GC",
+            "-XX:MaxGCPauseMillis=200",
+            "-XX:+UseZGC",
+            "-XX:+AlwaysPreTouch",
+            "-XX:+ParallelRefProcEnabled",
+            "-Dfile.encoding=UTF-8",
+        }
+        self._jvm_loading = True
+        try:
+            if text == "-XX:+UseG1GC" or text == "-XX:MaxGCPauseMillis=200":
+                self.jvm_g1_check.setChecked(False)
+            elif text == "-XX:+UseZGC":
+                self.jvm_zgc_check.setChecked(False)
+            elif text == "-XX:+AlwaysPreTouch":
+                self.jvm_pretouch_check.setChecked(False)
+            elif text == "-XX:+ParallelRefProcEnabled":
+                self.jvm_parallel_check.setChecked(False)
+            elif text == "-Dfile.encoding=UTF-8":
+                self.jvm_utf8_check.setChecked(False)
+            elif text in self._custom_jvm_args:
+                self._custom_jvm_args.remove(text)
+            elif text not in known:
+                self._custom_jvm_args = [
+                    value for value in self._custom_jvm_args if value != text
+                ]
+        finally:
+            self._jvm_loading = False
+        self.jvm_preset_combo.blockSignals(True)
+        index = self.jvm_preset_combo.findData("custom")
+        if index >= 0:
+            self.jvm_preset_combo.setCurrentIndex(index)
+        self.jvm_preset_combo.blockSignals(False)
+        self._sync_jvm_display()
+
+    def _recommend_jvm(self) -> None:
+        total = total_physical_memory_mb()
+        advice = jvm.recommend_memory(total)
+        self.max_mem_combo.setCurrentText(advice.max_text)
+        self.min_mem_combo.setCurrentText(advice.min_text)
+        self.memory_hint.setText(advice.reason)
+        index = self.jvm_preset_combo.findData("auto")
+        if index >= 0:
+            self.jvm_preset_combo.setCurrentIndex(index)
+        self._on_jvm_preset_changed()
+        self.jvm_hint.setText(
+            "已按物理内存推荐 Xmx/Xms；JVM 参数保持自动，由内核选择 G1GC。"
+        )
+
+    def _load_jvm_config(self, config) -> None:
+        raw_args = jvm.sanitize_args(getattr(config, "jvm_args", []) or [])
+        preset = str(getattr(config, "jvm_preset", "auto") or "auto")
+        if preset not in jvm.PRESET_LABELS:
+            preset = jvm.preset_for_args(raw_args)
+        known = set(jvm.G1_ARGS) | set(jvm.ZGC_ARGS) | {
+            "-XX:+AlwaysPreTouch",
+            "-Dfile.encoding=UTF-8",
+        }
+        args = set(raw_args)
+        self._jvm_loading = True
+        try:
+            self.jvm_g1_check.setChecked("-XX:+UseG1GC" in args)
+            self.jvm_zgc_check.setChecked("-XX:+UseZGC" in args)
+            self.jvm_pretouch_check.setChecked("-XX:+AlwaysPreTouch" in args)
+            self.jvm_parallel_check.setChecked("-XX:+ParallelRefProcEnabled" in args)
+            self.jvm_utf8_check.setChecked("-Dfile.encoding=UTF-8" in args)
+            self._custom_jvm_args = [arg for arg in raw_args if arg not in known]
+            index = self.jvm_preset_combo.findData(preset)
+            if index < 0:
+                index = self.jvm_preset_combo.findData(jvm.preset_for_args(raw_args))
+            self.jvm_preset_combo.setCurrentIndex(max(0, index))
+        finally:
+            self._jvm_loading = False
+        self._sync_jvm_display()
 
     # ------------------------------------------------------------- java scan
     def java_path(self) -> str:
@@ -336,6 +585,10 @@ class SettingsPage(QWidget):
             self.java_combo.setEditText("")
         self.java_combo.blockSignals(False)
 
+    def set_game_dir(self, path: str) -> None:
+        """Update the game directory field (used by the instance page)."""
+        self.game_dir_edit.setText(str(path or ""))
+
     def scan_java(self, silent: bool = False) -> None:
         if getattr(self, "_java_scanning", False):
             return
@@ -344,6 +597,7 @@ class SettingsPage(QWidget):
         self.java_status.setText("正在扫描本机 Java…")
         game_dir = self.game_dir_edit.text().strip()
         configured = str(getattr(self._config, "java_path", "") or "")
+        self._java_configured = configured
 
         def work(progress, cancelled):
             return java_scan.scan_java(
@@ -352,13 +606,12 @@ class SettingsPage(QWidget):
             )
 
         start_task(self, work, on_done=self._on_java_scanned, on_failed=self._on_java_scan_failed)
-        self._java_configured = configured
 
     def _on_java_scanned(self, installs: list[java_scan.JavaInstall]) -> None:
         self._java_scanning = False
         self.java_scan_button.setEnabled(True)
         configured = getattr(self, "_java_configured", "") or ""
-        keep_custom = configured not in ("", "java")
+        keep_custom = configured not in ("", "java") and Path(configured).exists()
         self.java_combo.blockSignals(True)
         self.java_combo.clear()
         for install in installs:
@@ -960,14 +1213,10 @@ class SettingsPage(QWidget):
             self.set_java_path(chosen)
 
     def _optimize_memory(self) -> None:
-        total = total_physical_memory_mb()
-        half = max(512, (int(total * 0.5) // 256) * 256)
-        quarter = max(256, (int(total * 0.25) // 256) * 256)
-        self.max_mem_combo.setCurrentText(f"{half}M")
-        self.min_mem_combo.setCurrentText(f"{quarter}M")
-        self.memory_hint.setText(
-            f"检测到 {total / 1024:.1f} GB 物理内存 → Xmx {half} MB，Xms {quarter} MB"
-        )
+        advice = jvm.recommend_memory(total_physical_memory_mb())
+        self.max_mem_combo.setCurrentText(advice.max_text)
+        self.min_mem_combo.setCurrentText(advice.min_text)
+        self.memory_hint.setText(advice.reason)
 
     def _toggle_developer(self, checked: bool) -> None:
         self.dev_panel.setVisible(checked)
@@ -1054,6 +1303,8 @@ class SettingsPage(QWidget):
             "update_repo": self.update_repo_edit.text().strip(),
             "auto_update_check": self.auto_update_check.isChecked(),
             "ai_model": self.ai_model_combo.currentText().strip() or "deepseek-chat",
+            "jvm_preset": self.jvm_preset_combo.currentData() or "auto",
+            "jvm_args": self._effective_jvm_args(),
         }
 
     def memory_adjusted(self) -> bool:
@@ -1109,6 +1360,7 @@ class SettingsPage(QWidget):
                 else "尚未配置 DeepSeek API Key（可留空，不影响其他功能）"
             )
             _repolish(self.ai_status)
+            self._load_jvm_config(config)
 
         finally:
             self._loading_settings = False

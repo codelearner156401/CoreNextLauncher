@@ -47,7 +47,13 @@ int main(int argc, char** argv) {
                     if (item.is_string()) extra_args.push_back(item.get<std::string>());
                 }
             }
-            auto argv_list = build_launch_command(vjson, mc_dir, vid, input["account"], input.value("java_path", "java"), input.value("max_mem", "auto"), input.value("min_mem", "auto"), true, input.value("offline_mode", false), extra_args);
+            std::vector<std::string> jvm_args;
+            if (input.contains("jvm_args") && input["jvm_args"].is_array()) {
+                for (auto& item : input["jvm_args"]) {
+                    if (item.is_string()) jvm_args.push_back(item.get<std::string>());
+                }
+            }
+            auto argv_list = build_launch_command(vjson, mc_dir, vid, input["account"], input.value("java_path", "java"), input.value("max_mem", "auto"), input.value("min_mem", "auto"), true, input.value("offline_mode", false), extra_args, jvm_args);
             int code = spawn_and_wait(argv_list, mc_dir);
             event::done({{"exit_code", code}});
         } else if (cmd == "install") {

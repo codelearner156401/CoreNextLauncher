@@ -72,11 +72,15 @@ cmake --build build --parallel
 
 ## 3. 运行与自测
 
+首次运行会在用户文档目录创建 `CoreNextLauncher` 工作区，并把
+`build/mc_core.exe` 自动部署到 `kernel/`；实例、配置、缓存与日志也统一放在
+该工作区中。可用环境变量 `CORENEXTLAUNCHER_HOME` 指定其他位置。
+
 ```powershell
 # 运行界面（源码模式）
 python main.py
 
-# 服务层 + 无头界面自测
+# 服务层 + 无头界面自测（使用临时工作区，不会写入文档目录）
 python tests/selftest.py
 ```
 

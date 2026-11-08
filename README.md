@@ -6,7 +6,7 @@
 > **不提供、不分发、不托管任何 Minecraft 游戏本体、客户端 JAR、资源文件或破解内容。**
 > 使用前请阅读 [免责声明](DISCLAIMER.md)。
 
-`版本 1.6.0` · `Windows 10/11` · `MIT License`
+`版本 1.7.0` · `Windows 10/11` · `MIT License`
 
 ---
 
@@ -48,11 +48,20 @@ CoreNextLauncher 是一个面向 Windows 的 Minecraft 启动器，采用「C++ 
 - **Java 自动托管**：检测到 Java 缺失时，可从 Adoptium 官方 API 下载 Temurin JDK（SHA-256 校验），解压后自动填入设置。
 - **Java 自动扫描**：读取系统注册表、常见安装目录、`PATH`、Minecraft `runtime/` 与启动器托管目录，探测版本后填入设置页下拉框。
 
+### 实例与性能
+
+- **实例管理**：在文档工作区的 `instances/` 下创建独立游戏目录；支持一键克隆（复制版本、Mod 与配置，可选是否复制存档），切换实例互不影响。
+- **Mod 批量管理**：Mod 列表支持 Ctrl / Shift 多选后批量启用或禁用；冲突检测覆盖重复 Mod ID、同名 jar、缺失前置，以及“前置已安装但被禁用”。
+- **内存推荐**：按物理内存自动推荐 Xmx / Xms，并为系统、显卡与其他程序预留空间。
+- **JVM 可视化编辑器**：G1GC / ZGC / 预触碰 / 并行引用 / 强制 UTF-8 开关，支持预设、自定义参数与“按硬件推荐”；参数随启动命令传给 C++ 内核。
+- **Java 自动探测**：扫描注册表、安装目录、`PATH`、Minecraft `runtime/` 与启动器托管的 Java；已配置路径失效时自动切换到最佳运行时。
+- **崩溃自动诊断**：启动失败后自动读取最新崩溃报告，识别常见错误并以弹窗给出原因与修复步骤。
+
 ### 百宝箱
 
 - **目录与备份**：一键打开 `.minecraft` / `mods` / `logs` / `saves` / `screenshots`；清理旧日志、崩溃报告与调试日志；手动勾选存档打包备份。
 - **启动前自动备份**：每次启动前静默、增量备份 `saves/`，只有存档变化时才重新压缩，并按份数滚动清理旧备份。
-- **可视化 Mod 管理**：列出所有 Mod（含已禁用），显示名称、版本、Mod ID、加载器与大小；勾选即可通过重命名 `.jar.disabled` 启用/禁用；支持重复 Mod ID 与缺失前置检测。
+- **可视化 Mod 管理**：列出所有 Mod（含已禁用），显示名称、版本、Mod ID、加载器与大小；勾选即可通过重命名 `.jar.disabled` 启用/禁用；支持多选批量开关、重复 Mod ID、同名 jar、缺失前置与前置被禁用检测。
 - **Modrinth 更新检测**：对 Mod 计算 SHA1 并查询 Modrinth，按游戏版本与加载器筛选可用更新，支持批量下载；旧文件保留为 `.old`。
 - **智能崩溃分析**：读取最新 `crash-reports`（或 `latest.log`、`hs_err_pid*.log`），用规则匹配内存不足、Java 版本不符、前置缺失、Mixin 冲突、显卡驱动、文件损坏、权限、端口占用、登录失效等常见问题，以弹窗形式给出通俗的原因说明与修复步骤，并列出可疑 Mod。
 - **整合包导入**：支持拖拽 `.mrpack` 到窗口或选择文件，解析 `modrinth.index.json`、下载文件、解压 overrides，并可自动安装对应 Fabric 加载器。
@@ -85,6 +94,10 @@ CoreNextLauncher 是一个面向 Windows 的 Minecraft 启动器，采用「C++ 
 | 截图待补充 | 截图待补充 |
 
 | 百宝箱 · 服务器监控 | 百宝箱 · 一键优化 |
+| :---: | :---: |
+| 截图待补充 | 截图待补充 |
+
+| 实例管理 | JVM 参数编辑器 |
 | :---: | :---: |
 | 截图待补充 | 截图待补充 |
 
@@ -182,10 +195,21 @@ python main.py --game-dir "<.minecraft 目录>"
 python main.py --exe "build/mc_core.exe"
 ```
 
-源码模式下，配置与登录凭证保存在项目根目录（`launcher_config.json`、
-`account.json`、`secrets.json`、`servers.json`），均已被 `.gitignore` 忽略。
-开发者模式 / 离线模式的状态单独保存在 `developer_state.json`，每次启动与
-退出都会强制重置为关闭。
+首次启动会在**用户文档目录**创建统一工作区（设置环境变量
+`CORENEXTLAUNCHER_HOME` 可覆盖位置）：
+
+```text
+Documents/CoreNextLauncher/
+├─ config/       launcher_config.json、账号与密钥
+├─ kernel/       mc_core.exe 与托管的 Java 运行时
+├─ instances/    各个游戏实例（default 为初始实例）
+├─ cache/        下载缓存、服务器图标、更新包
+├─ logs/         启动器日志目录
+└─ exports/      导出的整合包
+```
+
+配置与登录凭证不再放在 exe 或源码目录，`developer_state.json` 也在
+`config/` 下，并在每次启动与退出时强制重置为关闭。
 
 ### 6. 打包 exe
 
@@ -195,8 +219,8 @@ python main.py --exe "build/mc_core.exe"
 python -m PyInstaller CoreNextLauncher.spec --noconfirm --clean --workpath pyinstaller-build
 ```
 
-输出：`dist/CoreNextLauncher.exe`。打包后的程序使用 `%APPDATA%\CoreNextLauncher\`
-保存配置、登录信息与托管的 Java 运行时。
+输出：`dist/CoreNextLauncher.exe`。运行后会使用文档目录下的
+`CoreNextLauncher/` 工作区保存配置、实例、内核与 Java 运行时。
 
 ### 7. 自测
 
@@ -204,19 +228,34 @@ python -m PyInstaller CoreNextLauncher.spec --noconfirm --clean --workpath pyins
 python tests/selftest.py
 ```
 
-自测覆盖配置兼容、崩溃规则、Mod 开关与冲突、存档备份、截图索引、`.mrpack`
-解析、服务器 Ping 协议、更新脚本、Java 扫描，以及在 offscreen 平台构建主界面
-与百宝箱（不会弹出窗口）。
+自测覆盖配置兼容、工作区目录、实例克隆、JVM 推荐、崩溃规则、Mod 批量开关与
+冲突、存档备份、截图索引、`.mrpack` 解析、服务器 Ping 协议、更新脚本、Java
+扫描，以及在 offscreen 平台构建主界面、实例页与百宝箱（不会弹出窗口）。
 
 ## 使用教程
 
 ### 首次启动
 
-1. 打开启动器，进入「设置 → 游戏与 Java」。
-2. 选择 `.minecraft` 游戏目录。
+1. 启动器会在**用户文档目录**创建 `CoreNextLauncher` 工作区，并自动创建
+   `default` 实例、部署 C++ 内核。
+2. 打开「设置 → 游戏与 Java」，确认实例目录（默认已在工作区的
+   `instances/default`）。
 3. Java 路径下拉框会自动填入本机扫描到的运行时；若没有合适的 Java，可在
    「百宝箱 → 优化」中一键下载安装 Temurin。
 4. 点击右上角「未登录」，完成 Microsoft 正版登录（推荐且默认的启动方式）。
+
+### 实例管理
+
+1. 打开「实例」页，可新建实例、克隆选中实例、设为当前实例、打开目录或删除。
+2. 克隆会复制版本、Mod 与配置；默认包含 `saves` 存档，可取消勾选以加快速度。
+3. 「设为当前实例」会同步「设置 → 游戏目录」，版本库随后自动刷新。
+
+### 性能与 JVM
+
+- 「设置 → 游戏与 Java」中的「一键智能内存优化」会按物理内存推荐 Xmx / Xms。
+- 「设置 → JVM 参数 · 可视化」可选择预设、勾选 G1GC / ZGC / 预触碰等参数，
+  也可以追加自定义参数或点击「按硬件推荐」。
+- 参数会随启动命令传给内核；留空表示使用内核默认的 G1GC。ZGC 需要 Java 17+。
 
 ### 安装与启动游戏
 
@@ -229,7 +268,7 @@ python tests/selftest.py
 | 标签页 | 用途 |
 | --- | --- |
 | 目录与备份 | 打开常用目录、清理旧日志、手动备份存档 |
-| Mod 管理 | 启用/禁用 Mod、检测重复 ID 与缺失前置、检查 Modrinth 更新 |
+| Mod 管理 | 批量/单个启用或禁用 Mod、检测重复 ID/同名 jar/缺失前置、检查 Modrinth 更新 |
 | 崩溃诊断 | 分析崩溃报告并给出修复建议；可调用 AI 深入分析 |
 | 整合包 | 导入 Modrinth `.mrpack` 整合包 |
 | 服务器 | 添加服务器、Ping 监控、一键进服 |
@@ -318,13 +357,15 @@ python tests/selftest.py
 - 内核为 32 位进程；可启动 64 位 Java，但不支持在 32 位系统上运行 64 位 Java。
 - 整合包导入面向 Modrinth `.mrpack`：自动安装 Fabric；Quilt / Forge / NeoForge
   需要用户自行安装加载器。
+- 实例克隆会复制整个实例（默认包含存档），大型整合包可能需要较长时间与额外磁盘空间。
 - 一键优化会新增 `fabric-loader-…` 版本，需要在版本库中手动选择该版本启动，
   不会改动原版启动方式。
+- JVM 参数为高级选项：ZGC 需要 Java 17+，自定义参数不会做版本兼容校验，错误参数可能导致游戏无法启动。
 - 服务器 Ping 使用默认端口或显式端口，不解析 SRV 记录。
 - 在线更新只替换 `CoreNextLauncher.exe` 本体，不支持增量更新或回滚；源码模式下
   只提示，不替换文件。
 - AI 诊断需要联网并消耗 DeepSeek API 配额；未配置 Key 时该功能不可用。
-- 暂不支持多实例隔离、Mod 包版本锁定与云端同步。
+- 暂不支持 Mod 包版本锁定与云端同步。
 
 ## 编译依赖
 
@@ -356,8 +397,12 @@ CoreNextLauncher/
 │  └─ common.hpp              事件输出与进度节流
 ├─ launcher/                  Python / PySide6 界面
 │  ├─ services/               百宝箱服务层（无 Qt 依赖）
+│  │  ├─ instances.py         实例创建 / 克隆 / 删除
+│  │  └─ jvm.py               内存推荐与 JVM 预设
+│  ├─ ui/instance_page.py     实例管理页
 │  ├─ ui/toolbox/             百宝箱各标签页
 │  ├─ resources/themes/       暗黑 / 明亮 QSS 主题
+│  ├─ paths.py                文档工作区与目录布局
 │  ├─ auth.py                 Microsoft 设备码登录
 │  ├─ account.py              DPAPI 加密的账号存储
 │  ├─ config.py               启动器配置
@@ -368,7 +413,7 @@ CoreNextLauncher/
 ├─ assets/                    应用图标
 ├─ third_party/               json.hpp 与 curl 源码包
 ├─ CMakeLists.txt             C++ 构建配置
-├─ CoreNextLauncher.spec          PyInstaller 配置
+├─ CoreNextLauncher.spec      PyInstaller 配置
 ├─ main.py                    Python 入口
 ├─ BUILD.md                   C++ 内核构建说明
 ├─ DISCLAIMER.md              免责声明

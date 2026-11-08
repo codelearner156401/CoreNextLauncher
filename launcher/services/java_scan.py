@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Iterable
 
-from ..paths import data_dir
+from ..paths import kernel_dir
 
 _CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
@@ -232,7 +232,7 @@ def _runtime_homes(game_dir: Path | None) -> list[Path]:
     roots: list[Path] = []
     if game_dir:
         roots.append(Path(game_dir) / "runtime")
-    roots.append(data_dir() / "runtime")
+    roots.append(kernel_dir() / "runtime")
     homes: list[Path] = []
     for root in roots:
         if not root.is_dir():
@@ -298,9 +298,14 @@ def probe_java(exe: str | Path, source: str = "") -> JavaInstall | None:
     path = Path(exe)
     if not path.is_file():
         return None
+    probe_path = path
+    if path.name.lower() == "javaw.exe":
+        sibling = path.with_name("java.exe")
+        if sibling.is_file():
+            probe_path = sibling
     try:
         completed = subprocess.run(
-            [str(path), "-version"],
+            [str(probe_path), "-version"],
             capture_output=True,
             text=True,
             encoding="utf-8",

@@ -16,7 +16,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from ..paths import data_dir
+from ..paths import cache_dir, data_dir
 
 
 class PingError(RuntimeError):
@@ -282,7 +282,7 @@ def favicon_pixmap_data(status: ServerStatus) -> bytes:
 
 def favicon_cache_path(entry: ServerEntry) -> Path:
     safe = "".join(ch if ch.isalnum() or ch in "-._" else "_" for ch in entry.target)
-    return data_dir() / "server_icons" / f"{safe}.png"
+    return cache_dir() / "server_icons" / f"{safe}.png"
 
 
 # -------------------------------------------------------------------- store

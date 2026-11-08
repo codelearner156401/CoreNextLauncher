@@ -1,8 +1,9 @@
 """Download and unpack a Temurin JDK from the Adoptium API.
 
 Used when no suitable Java is installed: the archive is fetched with a size
-and SHA-256 check, extracted under ``%APPDATA%\\CoreNextLauncher\\runtime`` and the
-resulting ``java.exe`` is returned so the launcher can select it immediately.
+and SHA-256 check, extracted under ``Documents/CoreNextLauncher/kernel/runtime``
+and the resulting ``java.exe`` is returned so the launcher can select it
+immediately.
 """
 
 from __future__ import annotations
@@ -15,7 +16,7 @@ from pathlib import Path
 from typing import Callable
 
 from ..constants import ADOPTIUM_API
-from ..paths import data_dir
+from ..paths import kernel_dir
 from . import net
 
 StageCallback = Callable[[str, int, int], None]
@@ -103,7 +104,7 @@ def install_java(
     if progress:
         progress("正在查询 Adoptium 最新版本…", 0, 0)
     release = resolve_release(major)
-    runtime_root = data_dir() / "runtime"
+    runtime_root = kernel_dir() / "runtime"
     runtime_root.mkdir(parents=True, exist_ok=True)
     folder_name = f"temurin-{release.major}-{release.version.split('+')[0]}"
     install_dir = runtime_root / folder_name

@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import json
 import os
-from dataclasses import asdict, dataclass, fields
+from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 
 from .constants import DEFAULT_AI_MODEL, DEFAULT_MS_CLIENT_ID, DEFAULT_UPDATE_REPO
-from .paths import app_root, data_dir
+from .paths import app_root, data_dir, default_instance_dir
+from .services.jvm import PRESET_LABELS, sanitize_args
 
 PROJECT_ROOT = app_root()
 CONFIG_PATH = data_dir() / "launcher_config.json"
@@ -35,19 +36,14 @@ class AppConfig:
     update_repo: str = DEFAULT_UPDATE_REPO
     auto_update_check: bool = True
     ai_model: str = DEFAULT_AI_MODEL
+    # --- JVM -----------------------------------------------------------
+    jvm_preset: str = "auto"
+    jvm_args: list[str] = field(default_factory=list)
 
     def normalized(self) -> "AppConfig":
         """Fill in a sensible default game directory."""
         if not self.game_dir:
-            roaming = Path(os.environ.get("APPDATA", str(Path.home())))
-            real = roaming / ".minecraft"
-            demo = PROJECT_ROOT / "demo" / ".minecraft"
-            if real.is_dir():
-                self.game_dir = str(real)
-            elif (demo / "versions").is_dir():
-                self.game_dir = str(demo)
-            else:
-                self.game_dir = str(real)
+            self.game_dir = str(default_instance_dir())
         if self.theme not in {"dark", "light"}:
             self.theme = "dark"
         if not self.microsoft_client_id:
@@ -76,6 +72,9 @@ class AppConfig:
         if not isinstance(self.ai_model, str) or not self.ai_model.strip():
             self.ai_model = DEFAULT_AI_MODEL
         self.ai_model = self.ai_model.strip()
+        if self.jvm_preset not in PRESET_LABELS:
+            self.jvm_preset = "auto"
+        self.jvm_args = sanitize_args(self.jvm_args)
         return self
 
     def to_dict(self) -> dict:
