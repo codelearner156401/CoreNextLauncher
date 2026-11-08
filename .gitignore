@@ -1,5 +1,5 @@
 # ============================================================================
-# CoreLauncher · .gitignore
+# CoreNextLauncher · .gitignore
 # 目标：只提交启动器源码、文档与必要资源；构建产物、缓存、IDE 配置、
 # 本地用户数据以及任何 Minecraft 游戏文件都不进入版本库。
 # ============================================================================
@@ -96,6 +96,7 @@ desktop.ini
 # ---------------------------------------------------------------------------
 launcher_config.json
 launcher_settings.json
+developer_state.json
 account.json
 secrets.json
 servers.json
@@ -108,7 +109,7 @@ servers.json
 *.log
 hs_err_pid*.log
 launcher_update*.bat
-corelauncher_update_error.txt
+corenextlauncher_update_error.txt
 
 # ---------------------------------------------------------------------------
 # Minecraft 游戏数据 —— 项目红线：任何原版 jar、资源、破解文件都不入库

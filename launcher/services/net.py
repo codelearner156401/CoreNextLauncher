@@ -20,7 +20,7 @@ import urllib.request
 from pathlib import Path
 from typing import Any, Callable
 
-USER_AGENT = "CoreLauncher/1.6.0 (Windows; Minecraft launcher)"
+USER_AGENT = "CoreNextLauncher/1.6.0 (Windows; Minecraft launcher)"
 DEFAULT_TIMEOUT = 30.0
 DEFAULT_RETRIES = 3
 CHUNK = 256 * 1024

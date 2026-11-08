@@ -1,1 +1,1 @@
-"""Qt widgets and pages for CoreLauncher."""
+"""Qt widgets and pages for CoreNextLauncher."""

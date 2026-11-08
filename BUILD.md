@@ -85,10 +85,10 @@ python tests/selftest.py
 确认 `build/mc_core.exe` 已更新，然后：
 
 ```powershell
-python -m PyInstaller CoreLauncher.spec --noconfirm --clean --workpath pyinstaller-build
+python -m PyInstaller CoreNextLauncher.spec --noconfirm --clean --workpath pyinstaller-build
 ```
 
-输出：`dist/CoreLauncher.exe`。`CoreLauncher.spec` 会把 `build/mc_core.exe`
+输出：`dist/CoreNextLauncher.exe`。`CoreNextLauncher.spec` 会把 `build/mc_core.exe`
 和 `launcher/resources` 一起打包。
 
 ## 5. 重新生成源码模板（可选）

@@ -94,7 +94,8 @@ def _pick_asset(assets: list[dict]) -> ReleaseAsset | None:
     preferred = [
         item
         for item in candidates
-        if str(item.get("name") or "").lower() in {"corelauncher.exe", "corelauncher-portable.exe"}
+        if str(item.get("name") or "").lower()
+        in {"corenextlauncher.exe", "corenextlauncher-portable.exe"}
     ]
     chosen = (preferred or candidates)[0]
     return ReleaseAsset(
@@ -150,7 +151,7 @@ def download_update(
         raise UpdateError("这个 Release 没有提供 .exe 下载文件")
     folder = data_dir() / "updates"
     folder.mkdir(parents=True, exist_ok=True)
-    target = folder / (info.asset.name or "CoreLauncher-new.exe")
+    target = folder / (info.asset.name or "CoreNextLauncher-new.exe")
     if target.exists():
         target.unlink(missing_ok=True)
     net.download(
@@ -173,7 +174,7 @@ def can_self_update() -> bool:
 
 
 def _bat_path() -> Path:
-    return Path(os.environ.get("TEMP") or str(data_dir())) / f"corelauncher_update_{int(time.time())}.bat"
+    return Path(os.environ.get("TEMP") or str(data_dir())) / f"corenextlauncher_update_{int(time.time())}.bat"
 
 
 def _quote(path: Path) -> str:
@@ -183,7 +184,7 @@ def _quote(path: Path) -> str:
 def build_update_command(new_exe: Path, target_exe: Path, pid: int | None = None) -> tuple[Path, str]:
     """Write the helper script and return its path plus the script text."""
     process_id = int(pid if pid is not None else os.getpid())
-    exe_name = target_exe.name or "CoreLauncher.exe"
+    exe_name = target_exe.name or "CoreNextLauncher.exe"
     script = f"""@echo off
 setlocal
 chcp 65001 >nul
@@ -204,7 +205,7 @@ del /F /Q "%SOURCE%" >nul 2>nul
 del /F /Q "%~f0"
 exit /b 0
 :failed
-echo 更新失败：无法覆盖 %TARGET% > "%~dp0corelauncher_update_error.txt"
+echo 更新失败：无法覆盖 %TARGET% > "%~dp0corenextlauncher_update_error.txt"
 del /F /Q "%~f0"
 exit /b 1
 """

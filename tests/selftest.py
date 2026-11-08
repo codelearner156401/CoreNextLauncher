@@ -1,4 +1,4 @@
-"""Self-test for the CoreLauncher service layer and the Qt UI.
+"""Self-test for the CoreNextLauncher service layer and the Qt UI.
 
 Run from the project root:
 
@@ -26,8 +26,9 @@ sys.path.insert(0, str(ROOT))
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from launcher import APP_VERSION
+from launcher import APP_VERSION, dev_state
 from launcher.config import CONFIG_PATH, AppConfig, load_config, save_config
+from launcher.dev_state import STATE_PATH as DEV_STATE_PATH
 from launcher.services import backup, crash, modpack, mods, screenshots, servers, updater
 
 FAILURES: list[str] = []
@@ -121,14 +122,66 @@ def build_game_dir(root: Path) -> Path:
 # ----------------------------------------------------------------------- tests
 def test_config(root: Path) -> None:
     print("config")
-    config = AppConfig(update_repo="https://github.com/example/CoreLauncher/", backup_keep=99)
+    config = AppConfig(update_repo="https://github.com/example/CoreNextLauncher/", backup_keep=99)
     config.normalized()
-    check("repo normalised", config.update_repo == "example/CoreLauncher", config.update_repo)
+    check("repo normalised", config.update_repo == "example/CoreNextLauncher", config.update_repo)
     check("backup_keep clamped", config.backup_keep == 30, str(config.backup_keep))
     path = root / "config.json"
     save_config(config, path)
     loaded = load_config(path)
-    check("config roundtrip", loaded.update_repo == "example/CoreLauncher")
+    check("config roundtrip", loaded.update_repo == "example/CoreNextLauncher")
+    legacy = root / "legacy_config.json"
+    legacy.write_text(
+        json.dumps(
+            {
+                "game_dir": str(root),
+                "offline": True,
+                "offline_ack": True,
+                "developer_unlocked": True,
+            }
+        ),
+        encoding="utf-8",
+    )
+    migrated = load_config(legacy)
+    keys = migrated.to_dict()
+    check(
+        "legacy developer/offline keys ignored",
+        "offline" not in keys
+        and "offline_ack" not in keys
+        and "developer_unlocked" not in keys,
+    )
+
+
+def test_dev_state(root: Path) -> None:
+    print("developer state")
+    path = root / "developer_state.json"
+    state = dev_state.reset_state(path)
+    check(
+        "startup reset disables everything",
+        not state.developer_unlocked and not state.offline and not state.offline_ack,
+    )
+    path.write_text(
+        json.dumps({"developer_unlocked": True, "offline": True, "offline_ack": True}),
+        encoding="utf-8",
+    )
+    check("tampered file is readable", dev_state.read_state(path).offline_active)
+    state = dev_state.reset_state(path)
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    check(
+        "reset wipes persisted flags",
+        raw.get("developer_unlocked") is False
+        and raw.get("offline") is False
+        and raw.get("offline_ack") is False,
+    )
+    check("reset returns disabled state", not state.developer_unlocked and not state.offline)
+    dev_state.save_state(dev_state.DeveloperState(True, True, True), path)
+    check("session state can be saved", dev_state.read_state(path).offline_active)
+    dev_state.save_state(dev_state.DeveloperState(True, True, False), path)
+    check(
+        "offline without acknowledgement stays disabled",
+        not dev_state.read_state(path).offline_active,
+    )
+    dev_state.reset_state(path)
 
 
 def test_crash(game: Path) -> None:
@@ -355,16 +408,16 @@ def test_updater() -> None:
     check("older not newer", not updater.is_newer("v1.0.0", APP_VERSION))
     asset = updater._pick_asset(
         [
-            {"name": "CoreLauncher-arm64.exe", "browser_download_url": "https://x/arm64"},
-            {"name": "CoreLauncher.exe", "browser_download_url": "https://x/x64", "size": 42},
-            {"name": "CoreLauncher.exe.blockmap", "browser_download_url": "https://x/bm"},
+            {"name": "CoreNextLauncher-arm64.exe", "browser_download_url": "https://x/arm64"},
+            {"name": "CoreNextLauncher.exe", "browser_download_url": "https://x/x64", "size": 42},
+            {"name": "CoreNextLauncher.exe.blockmap", "browser_download_url": "https://x/bm"},
         ]
     )
-    check("asset prefers portable exe", asset is not None and asset.name == "CoreLauncher.exe")
+    check("asset prefers portable exe", asset is not None and asset.name == "CoreNextLauncher.exe")
     check("asset size kept", asset is not None and asset.size == 42)
     with tempfile.TemporaryDirectory() as temp:
         bat, script = updater.build_update_command(
-            Path(temp) / "new.exe", Path(temp) / "CoreLauncher.exe", pid=4242
+            Path(temp) / "new.exe", Path(temp) / "CoreNextLauncher.exe", pid=4242
         )
         check("bat written", bat.is_file())
         check("bat waits for pid", "PID=4242" in script)
@@ -420,6 +473,7 @@ def test_ui(root: Path) -> None:
     # The UI test runs from the source tree, where the launcher stores its
     # config next to main.py.  Preserve any real config and put it back.
     original_config = CONFIG_PATH.read_bytes() if CONFIG_PATH.is_file() else None
+    original_dev_state = DEV_STATE_PATH.read_bytes() if DEV_STATE_PATH.is_file() else None
     theme.apply_theme(app, "dark")
     check(
         "dark stylesheet includes toolbox rules",
@@ -433,6 +487,12 @@ def test_ui(root: Path) -> None:
         app.processEvents()
         time.sleep(0.03)
     check("main tabs", window.tabs.count() == 4)
+    check(
+        "developer/offline reset on startup",
+        not window.dev_state.developer_unlocked
+        and not window.settings_page.developer_state().offline_active,
+    )
+    check("developer card hidden at startup", window.settings_page.dev_card.isHidden())
     window.toolbox_page.set_game_dir(str(game))
     window.tabs.setCurrentIndex(2)
     for index in range(window.toolbox_page.tabs.count()):
@@ -448,6 +508,18 @@ def test_ui(root: Path) -> None:
         "crash" in window.toolbox_page.diagnose_tab.report_info.text(),
         window.toolbox_page.diagnose_tab.report_info.text(),
     )
+    for _ in range(7):
+        window.settings_page._on_version_clicked()
+    for _ in range(3):
+        app.processEvents()
+        time.sleep(0.02)
+    check(
+        "developer mode can be unlocked for the session",
+        window.settings_page.developer_state().developer_unlocked
+        and window.dev_state.developer_unlocked,
+    )
+    check("developer card shown after unlock", not window.settings_page.dev_card.isHidden())
+    check("developer state persisted for the session", DEV_STATE_PATH.is_file())
     window._on_theme_changed("light")
     for _ in range(6):
         app.processEvents()
@@ -460,10 +532,18 @@ def test_ui(root: Path) -> None:
         app.processEvents()
         time.sleep(0.02)
     check("window closed", not window.isVisible())
+    check(
+        "developer/offline reset on close",
+        not dev_state.read_state(DEV_STATE_PATH).developer_unlocked,
+    )
     if original_config is None:
         CONFIG_PATH.unlink(missing_ok=True)
     else:
         CONFIG_PATH.write_bytes(original_config)
+    if original_dev_state is None:
+        DEV_STATE_PATH.unlink(missing_ok=True)
+    else:
+        DEV_STATE_PATH.write_bytes(original_dev_state)
 
 
 def main() -> int:
@@ -471,6 +551,7 @@ def main() -> int:
         root = Path(temp)
         game = build_game_dir(root)
         test_config(root)
+        test_dev_state(root)
         test_crash(game)
         test_mods(game)
         test_backup(game)

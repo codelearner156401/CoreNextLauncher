@@ -1,4 +1,4 @@
-"""CoreLauncher desktop UI package."""
+"""CoreNextLauncher desktop UI package."""
 
 from .constants import APP_NAME, APP_VERSION
 

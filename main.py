@@ -1,4 +1,4 @@
-"""CoreLauncher desktop entry point.
+"""CoreNextLauncher desktop entry point.
 
 Usage:
     python main.py
@@ -45,7 +45,7 @@ def configure_high_dpi() -> None:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="CoreLauncher Minecraft 启动器")
+    parser = argparse.ArgumentParser(description="CoreNextLauncher Minecraft 启动器")
     parser.add_argument("--game-dir", help="覆盖 .minecraft 目录")
     parser.add_argument("--exe", help="覆盖 mc_core.exe 路径")
     parser.add_argument("--theme", choices=("dark", "light"), help="启动时使用的主题")
@@ -58,7 +58,7 @@ def main(argv: list[str] | None = None) -> int:
     configure_high_dpi()
     app = QApplication(sys.argv[:1])
     app.setApplicationName(APP_NAME)
-    app.setOrganizationName("CoreLauncher")
+    app.setOrganizationName("CoreNextLauncher")
     app.setStyle("Fusion")
     app.setWindowIcon(make_app_icon())
     app.aboutToQuit.connect(shutdown_workers)

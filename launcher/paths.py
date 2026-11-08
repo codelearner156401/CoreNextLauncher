@@ -26,5 +26,5 @@ def data_dir() -> Path:
     if is_frozen():
         roaming = os.environ.get("APPDATA")
         base = Path(roaming) if roaming else Path.home() / ".config"
-        return base / "CoreLauncher"
+        return base / "CoreNextLauncher"
     return app_root()

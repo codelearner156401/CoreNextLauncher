@@ -172,7 +172,7 @@ inline void init_share() {
 inline void apply_common_options(CURL* c) {
     curl_easy_setopt(c, CURLOPT_FOLLOWLOCATION, 1L);
     curl_easy_setopt(c, CURLOPT_MAXREDIRS, 10L);
-    curl_easy_setopt(c, CURLOPT_USERAGENT, "CoreLauncher/1.3.1");
+    curl_easy_setopt(c, CURLOPT_USERAGENT, "CoreNextLauncher/1.3.1");
     curl_easy_setopt(c, CURLOPT_CONNECTTIMEOUT, 20L);
     curl_easy_setopt(c, CURLOPT_LOW_SPEED_LIMIT, 512L);
     curl_easy_setopt(c, CURLOPT_LOW_SPEED_TIME, 45L);
@@ -1072,7 +1072,7 @@ inline std::vector<std::string> build_launch_command(const json& vjson, const fs
         {"${user_type}", account.value("user_type", "legacy")},
         {"${version_type}", vjson.value("type", "release")},
         {"${natives_directory}", fs::absolute(mc_dir / "versions" / vid / "natives").u8string()},
-        {"${launcher_name}", "CoreLauncher"},
+        {"${launcher_name}", "CoreNextLauncher"},
         {"${launcher_version}", "1.6.0"},
         {"${classpath}", classpath}};
     auto replace = [&](std::string s) {
@@ -1089,7 +1089,7 @@ inline std::vector<std::string> build_launch_command(const json& vjson, const fs
     // A JDK root / bin directory is normalised here as well, so direct CLI use
     // of mc_core.exe gets the same behaviour as the Python UI.
     std::vector<std::string> cmd = {normalize_java_path(java_path)};
-    if (offline) cmd.push_back("-Dminecraft.launcher.brand=CoreLauncher-Offline");
+    if (offline) cmd.push_back("-Dminecraft.launcher.brand=CoreNextLauncher-Offline");
     if (vjson.contains("arguments")) {
         for (auto& a : flatten_args(vjson["arguments"].value("jvm", json::array()), osn)) {
             cmd.push_back(replace(a));

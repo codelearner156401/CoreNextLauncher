@@ -31,6 +31,7 @@ from PySide6.QtWidgets import (
 
 from .. import theme
 from ..constants import APP_NAME, APP_VERSION
+from ..dev_state import DeveloperState
 from ..services import ai_diag
 from ..services import java_scan
 from .tasks import start_task
@@ -156,6 +157,7 @@ class SettingsPage(QWidget):
     account_login_requested = Signal()
     account_logout_requested = Signal()
     developer_unlocked = Signal()
+    developer_state_changed = Signal()
     appearance_changed = Signal()
     check_update_requested = Signal()
 
@@ -220,7 +222,7 @@ class SettingsPage(QWidget):
         footer = QHBoxLayout()
         footer.setContentsMargins(4, 2, 4, 2)
         footer.setSpacing(10)
-        self.version_label = ClickableLabel(f"CoreLauncher v{APP_VERSION}")
+        self.version_label = ClickableLabel(f"CoreNextLauncher v{APP_VERSION}")
         self.version_label.setObjectName("VersionLabel")
         self.version_label.setToolTip("连续点击 7 次解锁开发者选项")
         self.version_label.clicked.connect(self._on_version_clicked)
@@ -671,7 +673,7 @@ class SettingsPage(QWidget):
         update_row.setSpacing(10)
         update_row.addWidget(_field("更新仓库"))
         self.update_repo_edit = QLineEdit()
-        self.update_repo_edit.setPlaceholderText("owner/repo，例如 Notch/CoreLauncher")
+        self.update_repo_edit.setPlaceholderText("owner/repo，例如 Notch/CoreNextLauncher")
         self.update_repo_edit.setToolTip(
             "填写发布 Release 的 GitHub 仓库（owner/repo）。\n"
             "Release 中需要附带一个 .exe 文件用于自动更新。"
@@ -813,7 +815,10 @@ class SettingsPage(QWidget):
         self.offline_check.setChecked(False)
         self.offline_check.toggled.connect(self._on_offline_toggled)
         panel.addWidget(self.offline_check)
-        warning = QLabel("离线模式违反 Minecraft EULA，仅限本地测试与单机使用；启用前会再次弹出确认。")
+        warning = QLabel(
+            "离线模式违反 Minecraft EULA，仅限本地测试与单机使用；启用前会再次弹出确认。"
+            "开发者模式与离线模式仅在本次运行有效，关闭启动器后自动关闭。"
+        )
         warning.setObjectName("Hint")
         warning.setWordWrap(True)
         panel.addWidget(warning)
@@ -851,9 +856,10 @@ class SettingsPage(QWidget):
     def _unlock_developer(self) -> None:
         self._dev_unlocked = True
         self.dev_hint.setVisible(True)
-        self.dev_hint.setText("开发者模式已解锁")
+        self.dev_hint.setText("开发者模式已解锁（仅本次运行有效）")
         self._apply_developer_state(True)
         self.developer_unlocked.emit()
+        self.developer_state_changed.emit()
         QTimer.singleShot(0, lambda: self.scroll.ensureWidgetVisible(self.dev_card))
 
     def _apply_developer_state(self, unlocked: bool) -> None:
@@ -864,13 +870,36 @@ class SettingsPage(QWidget):
             self.dev_panel.setVisible(True)
             self.dev_toggle.setArrowType(Qt.ArrowType.DownArrow)
             self.dev_hint.setVisible(True)
-            self.dev_hint.setText("开发者模式已解锁")
+            self.dev_hint.setText("开发者模式已解锁（仅本次运行有效）")
         else:
             self.dev_toggle.setChecked(False)
             self.dev_panel.hide()
             self.dev_toggle.setArrowType(Qt.ArrowType.RightArrow)
             self.dev_hint.hide()
             self.dev_hint.setText("")
+
+    def developer_state(self) -> DeveloperState:
+        """Current session-only developer/offline switches."""
+        offline = self.offline_check.isChecked() and self._offline_ack
+        return DeveloperState(
+            developer_unlocked=bool(self._dev_unlocked),
+            offline=bool(offline),
+            offline_ack=bool(offline),
+        ).normalized()
+
+    def apply_developer_state(self, state: DeveloperState) -> None:
+        """Apply a session state (normally the all-disabled state at startup)."""
+        self._loading_settings = True
+        try:
+            active = bool(state.offline and state.offline_ack)
+            self.offline_check.blockSignals(True)
+            self.offline_check.setChecked(active)
+            self.offline_check.blockSignals(False)
+            self._offline_ack = active
+            self._version_clicks = 0
+            self._apply_developer_state(bool(state.developer_unlocked) or active)
+        finally:
+            self._loading_settings = False
 
     def _build_kernel_card(self) -> QFrame:
         card, layout = _card("C++ 内核", "图形界面通过 JSON 管道调用 build/mc_core.exe。")
@@ -951,6 +980,7 @@ class SettingsPage(QWidget):
             return
         if not checked:
             self._offline_ack = False
+            self.developer_state_changed.emit()
             return
 
         box = QMessageBox(self)
@@ -961,6 +991,7 @@ class SettingsPage(QWidget):
             "此选项仅可用于本地开发、测试，或你已合法购买并仅自己游玩的单人环境。\n\n"
             "启用后启动器不会验证正版账号，请勿用于联机服务器、分发或商业用途。\n"
             "由此产生的账号风险、法律风险与安全风险由你自行承担。\n\n"
+            "该设置仅在本次运行有效，关闭启动器后会自动关闭。\n\n"
             "确定要启用离线模式吗？"
         )
         box.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
@@ -972,6 +1003,7 @@ class SettingsPage(QWidget):
             self._offline_ack = False
         else:
             self._offline_ack = True
+        self.developer_state_changed.emit()
 
     def _on_theme_index(self, _index: int) -> None:
         key = self.theme_combo.currentData()
@@ -1012,8 +1044,6 @@ class SettingsPage(QWidget):
             "max_mem": max_mem,
             "min_mem": min_mem,
             "player_name": self.player_edit.text().strip() or "Steve",
-            "offline": self.offline_check.isChecked(),
-            "offline_ack": self.offline_check.isChecked() and self._offline_ack,
             "theme": self.theme_combo.currentData() or "dark",
             "background_image": self._background_path,
             "glass_enabled": self.glass_check.isChecked(),
@@ -1037,11 +1067,6 @@ class SettingsPage(QWidget):
             self._set_memory(self.max_mem_combo, config.max_mem)
             self._set_memory(self.min_mem_combo, getattr(config, "min_mem", "auto"))
             self.player_edit.setText(config.player_name)
-            self.offline_check.blockSignals(True)
-            enabled = bool(config.offline and getattr(config, "offline_ack", False))
-            self.offline_check.setChecked(enabled)
-            self.offline_check.blockSignals(False)
-            self._offline_ack = enabled
             theme_index = self.theme_combo.findData(config.theme)
             self.theme_combo.blockSignals(True)
             self.theme_combo.setCurrentIndex(max(0, theme_index))
@@ -1085,10 +1110,6 @@ class SettingsPage(QWidget):
             )
             _repolish(self.ai_status)
 
-            self._version_clicks = 0
-            self._apply_developer_state(
-                bool(getattr(config, "developer_unlocked", False)) or enabled
-            )
         finally:
             self._loading_settings = False
 

@@ -21,7 +21,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from . import APP_NAME, APP_VERSION
+from . import APP_NAME, APP_VERSION, dev_state
 from .account import clear_account, load_account, save_account
 from .auth import refresh_account
 from .config import AppConfig, save_config
@@ -55,6 +55,10 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.client = client
         self.config = config
+        # Developer mode and offline login are session-only: wipe them before
+        # any UI exists, so a stale state file or a killed process cannot
+        # re-enable them on the next start.
+        self.dev_state = dev_state.reset_session_state()
         self.account = load_account()
         self._scan_worker: ScanWorker | None = None
         self._launch_worker: LaunchWorker | None = None
@@ -96,6 +100,7 @@ class MainWindow(QMainWindow):
         right.setSpacing(14)
         self.tabs = AnimatedTabView()
         self.settings_page = SettingsPage(config)
+        self.settings_page.apply_developer_state(self.dev_state)
         self.install_page = InstallPage()
         self.toolbox_page = ToolboxPage(self, config.game_dir)
         self.log_page = LogPage()
@@ -125,8 +130,11 @@ class MainWindow(QMainWindow):
         )
         self._refresh_account_ui()
         self._refresh_kernel(log=True)
-        self.log_page.log("info", "CoreLauncher UI 已启动")
+        self.log_page.log("info", "CoreNextLauncher UI 已启动")
         self.log_page.log("muted", f"版本 {APP_VERSION} · PySide6 + 液态玻璃界面")
+        self.log_page.log(
+            "muted", "开发者模式与离线登录已在本次启动时重置为关闭（仅本次运行可临时开启）"
+        )
         QTimer.singleShot(150, self.refresh_versions)
         QTimer.singleShot(2600, self._maybe_auto_check_update)
 
@@ -266,6 +274,9 @@ class MainWindow(QMainWindow):
         self.settings_page.account_login_requested.connect(self.open_account)
         self.settings_page.account_logout_requested.connect(self.logout_account)
         self.settings_page.developer_unlocked.connect(self._on_developer_unlocked)
+        self.settings_page.developer_state_changed.connect(
+            self._on_developer_state_changed
+        )
 
     def _install_shortcuts(self) -> None:
         refresh = QAction(self)
@@ -458,7 +469,12 @@ class MainWindow(QMainWindow):
         # pressing the explicit "保存设置" button.
         self._save_config(silent=True)
 
-        offline = bool(values["offline"])
+        offline = self.settings_page.developer_state().offline_active
+        if offline:
+            self.log_page.log(
+                "warn",
+                "离线模式已启用（仅本次运行有效）：本次启动不会验证 Microsoft 账号。",
+            )
         if offline:
             account_payload = {
                 "name": values["player_name"],
@@ -1138,9 +1154,16 @@ class MainWindow(QMainWindow):
         self.refresh_versions()
 
     def _on_developer_unlocked(self) -> None:
-        self.config.developer_unlocked = True
-        self._save_config(silent=True)
-        self.log_page.log("success", "开发者模式已解锁。")
+        self.log_page.log(
+            "success", "开发者模式已解锁（仅本次运行有效，关闭启动器后自动关闭）。"
+        )
+
+    def _on_developer_state_changed(self) -> None:
+        self.dev_state = self.settings_page.developer_state()
+        try:
+            dev_state.save_state(self.dev_state)
+        except OSError as exc:
+            self.log_page.log("warn", f"开发者状态保存失败：{exc}")
 
     # --------------------------------------------------------------- close
     def showEvent(self, event) -> None:  # noqa: N802
@@ -1158,4 +1181,6 @@ class MainWindow(QMainWindow):
             self._scan_worker.wait(1500)
         cancel_tasks(self, timeout=3.0)
         self._save_config(silent=True)
+        # Never leave developer mode or offline login enabled on disk.
+        self.dev_state = dev_state.reset_state()
         super().closeEvent(event)

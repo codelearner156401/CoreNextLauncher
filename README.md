@@ -1,4 +1,4 @@
-# CoreLauncher
+# CoreNextLauncher
 
 **现代化、原生体验的 Minecraft 第三方启动器**：C++ 内核负责版本扫描、官方源安装、文件校验与游戏进程启动，PySide6 负责界面、账号与百宝箱。
 
@@ -29,7 +29,7 @@
 
 ## 项目介绍
 
-CoreLauncher 是一个面向 Windows 的 Minecraft 启动器，采用「C++ 内核 + Python 界面」的双层架构：
+CoreNextLauncher 是一个面向 Windows 的 Minecraft 启动器，采用「C++ 内核 + Python 界面」的双层架构：
 
 - **C++ 内核（`mc_core.exe`）**：扫描版本目录、解析版本继承、从 Mojang 官方源安装游戏、并发下载并校验文件、解压 natives、构建 JVM 命令并启动游戏。内核通过标准输入输出上的逐行 JSON 协议与界面通信，可独立于界面进行调试。
 - **Python 界面（PySide6）**：负责窗口、动效、液态玻璃主题、Microsoft 正版登录、下载进度展示，以及「百宝箱」中的 Mod 管理、崩溃诊断、整合包导入、服务器监控、截图管理、Java 托管、一键优化、AI 诊断与在线更新。
@@ -68,7 +68,7 @@ CoreLauncher 是一个面向 Windows 的 Minecraft 启动器，采用「C++ 内�
 - 底部固定启动栏；启动按钮 1.05× 悬停放大、0.93× 按压、OutBack 回弹与发光阴影。
 - 自定义背景图、实时液态玻璃（亚克力）效果、暗黑/明亮双主题。
 - 高 DPI 适配：支持 2K/4K 与 Windows 125%/150% 缩放。
-- 隐藏开发者入口：设置页底部版本号连续点击 7 次解锁，默认不展示（详见[风险声明](#开发者模式与离线模式风险声明)）。
+- 隐藏开发者入口：设置页底部版本号连续点击 7 次解锁，默认不展示；开发者模式与离线模式**仅在本次运行有效**，关闭启动器后自动关闭（详见[风险声明](#开发者模式与离线模式风险声明)）。
 
 ## 界面截图
 
@@ -114,8 +114,8 @@ CoreLauncher 是一个面向 Windows 的 Minecraft 启动器，采用「C++ 内�
 ### 1. 获取源码
 
 ```powershell
-git clone https://github.com/YOUR_NAME/CoreLauncher.git
-cd CoreLauncher
+git clone https://github.com/Codelearner156401/CoreNextLauncher.git
+cd CoreNextLauncher
 ```
 
 ### 2. 安装 Python 依赖
@@ -184,16 +184,18 @@ python main.py --exe "build/mc_core.exe"
 
 源码模式下，配置与登录凭证保存在项目根目录（`launcher_config.json`、
 `account.json`、`secrets.json`、`servers.json`），均已被 `.gitignore` 忽略。
+开发者模式 / 离线模式的状态单独保存在 `developer_state.json`，每次启动与
+退出都会强制重置为关闭。
 
 ### 6. 打包 exe
 
 确认 `build/mc_core.exe` 已更新，然后：
 
 ```powershell
-python -m PyInstaller CoreLauncher.spec --noconfirm --clean --workpath pyinstaller-build
+python -m PyInstaller CoreNextLauncher.spec --noconfirm --clean --workpath pyinstaller-build
 ```
 
-输出：`dist/CoreLauncher.exe`。打包后的程序使用 `%APPDATA%\CoreLauncher\`
+输出：`dist/CoreNextLauncher.exe`。打包后的程序使用 `%APPDATA%\CoreNextLauncher\`
 保存配置、登录信息与托管的 Java 运行时。
 
 ### 7. 自测
@@ -267,7 +269,12 @@ python tests/selftest.py
 
 「设置」页底部的版本号只是版本标识。只有连续点击 7 次才会显示「开发者选项」，
 这是为了避免误触和误用。离线模式开关位于开发者选项内，默认关闭；开启时会
-弹出 EULA 风险确认，必须再次确认才会生效，确认状态会持久化到本地配置。
+弹出 EULA 风险确认，必须再次确认才会生效。
+
+开发者模式与离线模式**只在本次运行中有效**：状态保存在独立的
+`developer_state.json`（不写入 `launcher_config.json`），启动器每次启动时
+都会强制重置为关闭，正常退出时也会再次清零。即使上次异常退出或手动修改了
+状态文件，重启后也不会自动恢复。
 
 ### 离线模式是什么
 
@@ -314,7 +321,7 @@ python tests/selftest.py
 - 一键优化会新增 `fabric-loader-…` 版本，需要在版本库中手动选择该版本启动，
   不会改动原版启动方式。
 - 服务器 Ping 使用默认端口或显式端口，不解析 SRV 记录。
-- 在线更新只替换 `CoreLauncher.exe` 本体，不支持增量更新或回滚；源码模式下
+- 在线更新只替换 `CoreNextLauncher.exe` 本体，不支持增量更新或回滚；源码模式下
   只提示，不替换文件。
 - AI 诊断需要联网并消耗 DeepSeek API 配额；未配置 Key 时该功能不可用。
 - 暂不支持多实例隔离、Mod 包版本锁定与云端同步。
@@ -336,7 +343,7 @@ python tests/selftest.py
 ## 项目结构
 
 ```text
-CoreLauncher/
+CoreNextLauncher/
 ├─ src/                       C++ 内核源码
 │  ├─ main.cpp                JSON 管道入口（scan / install / launch）
 │  ├─ http.hpp                并发下载、Range、重试、校验
@@ -361,7 +368,7 @@ CoreLauncher/
 ├─ assets/                    应用图标
 ├─ third_party/               json.hpp 与 curl 源码包
 ├─ CMakeLists.txt             C++ 构建配置
-├─ CoreLauncher.spec          PyInstaller 配置
+├─ CoreNextLauncher.spec          PyInstaller 配置
 ├─ main.py                    Python 入口
 ├─ BUILD.md                   C++ 内核构建说明
 ├─ DISCLAIMER.md              免责声明
@@ -386,7 +393,7 @@ CoreLauncher/
 本项目使用 [MIT License](LICENSE) 开源。
 
 ```text
-Copyright (c) 2025-2026 CoreLauncher contributors
+Copyright (c) 2025-2026 CoreNextLauncher contributors
 ```
 
 你可以自由使用、修改、分发本项目的代码，但需保留版权声明与许可声明。

@@ -21,9 +21,6 @@ class AppConfig:
     max_mem: str = "auto"
     min_mem: str = "auto"
     player_name: str = "Steve"
-    offline: bool = False
-    offline_ack: bool = False
-    developer_unlocked: bool = False
     theme: str = "dark"
     last_version: str = ""
     microsoft_client_id: str = DEFAULT_MS_CLIENT_ID
@@ -79,14 +76,6 @@ class AppConfig:
         if not isinstance(self.ai_model, str) or not self.ai_model.strip():
             self.ai_model = DEFAULT_AI_MODEL
         self.ai_model = self.ai_model.strip()
-        # Offline mode is opt-in and must never be inherited silently from an
-        # older config that predates the confirmation warning.
-        if self.offline and not self.offline_ack:
-            self.offline = False
-        if not self.offline:
-            self.offline_ack = False
-        if self.offline and self.offline_ack:
-            self.developer_unlocked = True
         return self
 
     def to_dict(self) -> dict:
