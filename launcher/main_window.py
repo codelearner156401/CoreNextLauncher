@@ -7,8 +7,15 @@ import re
 import time
 from pathlib import Path
 
-from PySide6.QtCore import QRect, Qt, QTimer
-from PySide6.QtGui import QAction, QCloseEvent, QDragEnterEvent, QDropEvent, QKeySequence
+from PySide6.QtCore import QRect, Qt, QTimer, QUrl
+from PySide6.QtGui import (
+    QAction,
+    QCloseEvent,
+    QDesktopServices,
+    QDragEnterEvent,
+    QDropEvent,
+    QKeySequence,
+)
 from PySide6.QtWidgets import (
     QApplication,
     QFrame,
@@ -18,13 +25,14 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QPushButton,
+    QSizeGrip,
     QVBoxLayout,
     QWidget,
 )
 
-from . import APP_NAME, APP_VERSION, dev_state
+from . import APP_NAME, APP_VERSION, anim, dev_state
 from .account import clear_account, load_account, save_account
-from .auth import refresh_account
+from .auth import AuthError, AuthNetworkError, refresh_account
 from .config import AppConfig, save_config
 from .constants import DEFAULT_MS_CLIENT_ID
 from .core_client import CoreClient
@@ -35,12 +43,13 @@ from .services import crash as crash_service
 from .services import java_install
 from .services import java_scan
 from .services import updater
-from .theme import THEME_LABELS, apply_theme, apply_window_effects
+from .theme import THEME_LABELS, apply_acrylic, apply_theme, apply_window_effects
 from .ui.account_dialog import AccountDialog
 from .ui.crash_dialog import CrashDialog
 from .ui.glass import BackgroundWidget, GlassFrame
 from .ui.instance_page import InstancePage
 from .ui.pages import InstallPage, LogPage, SettingsPage
+from .ui.start_page import StartPage
 from .ui.tasks import cancel_tasks, start_task
 from .ui.toolbox import ModpackImportDialog, ToolboxPage
 from .ui.update_dialog import UpdateDialog
@@ -54,11 +63,59 @@ from .ui.widgets import (
 from .workers import InstallWorker, LaunchWorker, ScanWorker
 
 
+class DragHeader(QFrame):
+    """Frameless title area: drag to move, double-click to maximise."""
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self._drag = None
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802
+        if event.button() == Qt.MouseButton.LeftButton:
+            handle = self.window().windowHandle()
+            if handle is not None and handle.startSystemMove():
+                event.accept()
+                return
+            self._drag = event.globalPosition().toPoint() - self.window().frameGeometry().topLeft()
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:  # noqa: N802
+        if self._drag is not None and event.buttons() & Qt.MouseButton.LeftButton:
+            self.window().move(event.globalPosition().toPoint() - self._drag)
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:  # noqa: N802
+        self._drag = None
+        super().mouseReleaseEvent(event)
+
+    def mouseDoubleClickEvent(self, event) -> None:  # noqa: N802
+        if event.button() == Qt.MouseButton.LeftButton:
+            window = self.window()
+            if window.isMaximized():
+                window.showNormal()
+            else:
+                window.showMaximized()
+            event.accept()
+            return
+        super().mouseDoubleClickEvent(event)
+
+
+def theme_colors_bg(base: str) -> str:
+    from . import theme as _theme
+
+    return _theme.colors(base)["bg"]
+
+
 class MainWindow(QMainWindow):
     def __init__(self, client: CoreClient, config: AppConfig) -> None:
         super().__init__()
         self.client = client
         self.config = config
+        anim.set_speed(getattr(config, "animation_speed", 1.0))
         self.workspace = ensure_workspace()
         # Developer mode and offline login are session-only: wipe them before
         # any UI exists, so a stale state file or a killed process cannot
@@ -83,6 +140,8 @@ class MainWindow(QMainWindow):
         self._appearance_save_timer.setInterval(450)
         self._appearance_save_timer.timeout.connect(lambda: self._save_config(silent=True))
 
+        self.setWindowFlags(Qt.WindowType.Window | Qt.WindowType.FramelessWindowHint)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.setWindowTitle(f"{APP_NAME} · Minecraft")
         self.resize(1240, 820)
         self.setMinimumSize(1000, 680)
@@ -104,6 +163,7 @@ class MainWindow(QMainWindow):
         right = QVBoxLayout()
         right.setSpacing(14)
         self.tabs = AnimatedTabView()
+        self.start_page = StartPage()
         self.settings_page = SettingsPage(config)
         self.settings_page.apply_developer_state(self.dev_state)
         self.instance_page = InstancePage()
@@ -111,11 +171,12 @@ class MainWindow(QMainWindow):
         self.install_page = InstallPage()
         self.toolbox_page = ToolboxPage(self, config.game_dir)
         self.log_page = LogPage()
-        self.tabs.addTab(self.settings_page, "设置")
+        self.tabs.addTab(self.start_page, "启动")
         self.tabs.addTab(self.instance_page, "实例")
         self.tabs.addTab(self.install_page, "下载 / 安装")
         self.tabs.addTab(self.toolbox_page, "百宝箱")
         self.tabs.addTab(self.log_page, "日志")
+        self.tabs.addTab(self.settings_page, "设置")
         right.addWidget(self.tabs, 1)
         body.addLayout(right, 1)
         outer.addLayout(body, 1)
@@ -127,6 +188,11 @@ class MainWindow(QMainWindow):
             lambda message: self.log_page.log("warn", message)
         )
         self._apply_appearance()
+        _values = self.settings_page.values()
+        self.start_page.set_environment(
+            str(_values.get("java_path", "") or ""),
+            f"{_values.get('max_mem', '自动')} / {_values.get('min_mem', '自动')}",
+        )
         if self.settings_page.memory_adjusted():
             corrected_min = self.settings_page.values().get("min_mem", "")
             self.log_page.log(
@@ -139,7 +205,7 @@ class MainWindow(QMainWindow):
         self._refresh_account_ui()
         self._refresh_kernel(log=True)
         self.log_page.log("info", "CoreNextLauncher UI 已启动")
-        self.log_page.log("muted", f"版本 {APP_VERSION} · PySide6 + 液态玻璃界面")
+        self.log_page.log("muted", f"版本 {APP_VERSION} · PySide6 + 液态/毛玻璃/HTML 三套界面")
         self.log_page.log("muted", f"工作区：{workspace_root()}")
         self.log_page.log(
             "muted", "开发者模式与离线登录已在本次启动时重置为关闭（仅本次运行可临时开启）"
@@ -149,7 +215,7 @@ class MainWindow(QMainWindow):
 
     # ------------------------------------------------------------------ UI
     def _build_header(self) -> QFrame:
-        header = QFrame()
+        header = DragHeader()
         header.setObjectName("Header")
         row = QHBoxLayout(header)
         row.setContentsMargins(2, 0, 2, 0)
@@ -183,6 +249,26 @@ class MainWindow(QMainWindow):
         self.kernel_chip = QLabel("● 内核检测中")
         self.kernel_chip.setObjectName("KernelChip")
         row.addWidget(self.kernel_chip)
+        row.addSpacing(10)
+
+        self.min_button = QPushButton("—")
+        self.min_button.setObjectName("WindowButton")
+        self.min_button.setToolTip("最小化")
+        self.min_button.setFixedSize(32, 30)
+        self.min_button.clicked.connect(self.showMinimized)
+        row.addWidget(self.min_button)
+        self.max_button = QPushButton("□")
+        self.max_button.setObjectName("WindowButton")
+        self.max_button.setToolTip("最大化 / 还原")
+        self.max_button.setFixedSize(32, 30)
+        self.max_button.clicked.connect(self._toggle_maximized)
+        row.addWidget(self.max_button)
+        self.close_button = QPushButton("✕")
+        self.close_button.setObjectName("WindowCloseButton")
+        self.close_button.setToolTip("关闭")
+        self.close_button.setFixedSize(32, 30)
+        self.close_button.clicked.connect(self.close)
+        row.addWidget(self.close_button)
         return header
 
     def _build_sidebar(self) -> QFrame:
@@ -267,6 +353,7 @@ class MainWindow(QMainWindow):
         self.settings_page.theme_changed.connect(self._on_theme_changed)
         self.settings_page.settings_saved.connect(self._on_settings_saved)
         self.settings_page.appearance_changed.connect(self._on_appearance_changed)
+        self.settings_page.animation_speed_changed.connect(self._on_animation_speed_changed)
         self.settings_page.kernel_recheck.connect(lambda: self._refresh_kernel(log=True))
         self.settings_page.check_update_requested.connect(lambda: self.check_updates())
         self.install_page.log_requested.connect(self.log_page.log)
@@ -288,6 +375,17 @@ class MainWindow(QMainWindow):
         )
         self.instance_page.log_requested.connect(self.log_page.log)
         self.instance_page.instance_changed.connect(self._on_instance_changed)
+        self.start_page.launch_requested.connect(self.start_launch)
+        self.start_page.open_folder_requested.connect(self._open_game_folder)
+        self.start_page.open_logs_requested.connect(
+            lambda: self.tabs.setCurrentWidget(self.log_page)
+        )
+
+    def _open_game_folder(self) -> None:
+        game_dir = str(self.settings_page.values().get("game_dir", "") or "")
+        if not game_dir:
+            return
+        QDesktopServices.openUrl(QUrl.fromLocalFile(game_dir))
 
     def _install_shortcuts(self) -> None:
         refresh = QAction(self)
@@ -306,6 +404,32 @@ class MainWindow(QMainWindow):
         style.polish(widget)
 
     # ------------------------------------------------------------- kernel
+    def _toggle_maximized(self) -> None:
+        if self.isMaximized():
+            self.showNormal()
+        else:
+            self.showMaximized()
+
+    def changeEvent(self, event) -> None:  # noqa: N802
+        super().changeEvent(event)
+        if event.type() == event.Type.WindowStateChange and hasattr(self, "max_button"):
+            self.max_button.setText("❐" if self.isMaximized() else "□")
+
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        grip = getattr(self, "_size_grip", None)
+        if grip is not None:
+            grip.move(self.width() - grip.width() - 2, self.height() - grip.height() - 2)
+            grip.raise_()
+
+    def showEvent(self, event) -> None:  # noqa: N802
+        super().showEvent(event)
+        if not hasattr(self, "_size_grip"):
+            self._size_grip = QSizeGrip(self)
+            self._size_grip.setFixedSize(18, 18)
+            self._size_grip.raise_()
+        self._apply_appearance()
+
     def _refresh_kernel(self, log: bool = False) -> None:
         ok = self.client.available
         self.kernel_chip.setText("● 内核就绪" if ok else "● 内核缺失")
@@ -423,6 +547,7 @@ class MainWindow(QMainWindow):
             self.launch_sub.setText("从左侧版本库选择一个版本后启动")
             self.install_page.set_version(self._scan_game_dir, None)
             self.launch_button.setEnabled(False)
+            self.start_page.set_version("")
             return
         version_id = str(data.get("id", ""))
         version_type = str(data.get("type", "release"))
@@ -430,6 +555,7 @@ class MainWindow(QMainWindow):
         self.launch_title.setText(version_id)
         self.launch_sub.setText(f"{label} · 已安装")
         self.launch_sub.setToolTip(str(data.get("dir", "")))
+        self.start_page.set_version(version_id, label)
         self.install_page.set_version(self._scan_game_dir, data)
         self.config.last_version = version_id
         if not (self._launch_worker is not None and self._launch_worker.isRunning()):
@@ -1018,6 +1144,7 @@ class MainWindow(QMainWindow):
             self.account_button.setText(self.account.name)
             self.account_button.setToolTip(f"{self.account.name}\n{self.account.uuid}")
         self.settings_page.set_account(self.account)
+        self.start_page.set_account(self.account.name if self.account else "")
 
     def open_account(self) -> None:
         dialog = AccountDialog(
@@ -1062,13 +1189,30 @@ class MainWindow(QMainWindow):
             self.account = account
             self._refresh_account_ui()
             self.log_page.log("success", f"正版登录已刷新：{account.name}")
-        except Exception as exc:
+        except AuthNetworkError as exc:
+            if self.account is not None and self.account.within_cache(30):
+                self.log_page.log(
+                    "warn",
+                    f"网络不可用，使用本地缓存的正版凭证（30 天内有效）：{exc}",
+                )
+                self.log_page.log(
+                    "muted", "缓存凭证仅用于断网时的单人游戏，联网后会自动重新校验。"
+                )
+            else:
+                self.log_page.log("error", f"网络不可用且缓存已超过 30 天：{exc}")
+                clear_account()
+                self.account = None
+                self._refresh_account_ui()
+                self.open_account()
+        except AuthError as exc:
             self.log_page.log("error", f"刷新正版登录失败：{exc}")
             clear_account()
             self.account = None
             self._refresh_account_ui()
             self.log_page.log("info", "请重新完成 Microsoft 登录。")
             self.open_account()
+        except Exception as exc:
+            self.log_page.log("error", f"刷新正版登录失败：{exc}")
         finally:
             QApplication.restoreOverrideCursor()
         return self.account
@@ -1171,39 +1315,66 @@ class MainWindow(QMainWindow):
         has_version = self.version_list.current_data() is not None
         self.launch_button.setEnabled(not running and has_version)
         self.launch_button.setText("启动中…" if running else "▶   启动游戏")
+        self.start_page.set_running(running)
         self.stop_button.setVisible(running)
         self.log_page.set_running(running)
 
     # --------------------------------------------------------------- theme
     def _on_theme_changed(self, key: str) -> None:
+        """Legacy theme signal kept for compatibility with older widgets."""
+        style = key if key in ("liquid", "frosted", "html") else "liquid"
+        self.settings_page.set_theme_key(style)
+        self._apply_appearance()
+        self._save_config(silent=True)
+
+    def _on_animation_speed_changed(self, speed: float) -> None:
+        self.config.animation_speed = anim.set_speed(speed)
+        self._save_config(silent=True)
+        self.log_page.log("muted", f"动画速度已调整为 {self.config.animation_speed:.2f}x")
+
+    # ----------------------------------------------------------- appearance
+    def _apply_appearance(self) -> None:
+        values = self.settings_page.values()
+        style = str(values.get("ui_style") or "liquid")
+        profiles = values.get("theme_profiles") or {}
+        profile = profiles.get(style) if isinstance(profiles, dict) else None
+        if not isinstance(profile, dict):
+            profile = {}
+        base = str(profile.get("base") or ("light" if style in ("frosted", "html") else "dark"))
+        primary = str(profile.get("primary") or "#4f8cff")
+        accent = str(profile.get("accent") or "#7b5cff")
+        glass = bool(profile.get("glass", True))
+        system_blur = bool(profile.get("system_blur", True))
         app = QApplication.instance()
-        if app is None:
-            return
-        apply_theme(app, key)
-        self.backdrop.set_theme(key)
-        self.settings_page.set_theme_key(key)
+        if app is not None:
+            apply_theme(app, style, base, primary, accent)
+        self.backdrop.set_theme(base)
+        apply_window_effects(self, base)
+        blur_value = int(profile.get("blur", 26) or 0)
+        acrylic_ok = apply_acrylic(
+            self,
+            system_blur,
+            tint=theme_colors_bg(base),
+            alpha=min(185, 55 + blur_value) if glass else 45,
+        )
+        use_system_blur = system_blur and acrylic_ok
+        if system_blur and not acrylic_ok:
+            apply_acrylic(self, False)
+        self.backdrop.apply_settings(
+            image_path=str(profile.get("background") or ""),
+            glass=glass,
+            blur=int(profile.get("blur", 26) or 0),
+            dim=int(profile.get("dim", 42) or 0),
+            theme_key=base,
+            system_blur=use_system_blur,
+        )
         for frame in self.findChildren(GlassFrame):
             frame.update()
         self.tabs.tab_bar.update()
         self.tabs.stack.update()
         self.version_list.viewport().update()
         self.log_page.log_view.refresh_theme()
-        apply_window_effects(self, key)
-        self.log_page.log("muted", f"主题已切换为：{THEME_LABELS.get(key, key)}")
-        self._save_config(silent=True)
-
-    # ----------------------------------------------------------- appearance
-    def _apply_appearance(self) -> None:
-        values = self.settings_page.values()
-        self.backdrop.apply_settings(
-            image_path=str(values.get("background_image", "")),
-            glass=bool(values.get("glass_enabled", True)),
-            blur=int(values.get("glass_blur", 26)),
-            dim=int(values.get("background_dim", 42)),
-            theme_key=str(values.get("theme") or self.config.theme),
-        )
-        for frame in self.findChildren(GlassFrame):
-            frame.update()
+        self.settings_page.refresh_appearance_theme()
         self.update()
 
     def _on_appearance_changed(self) -> None:
@@ -1250,6 +1421,10 @@ class MainWindow(QMainWindow):
         self.log_page.log("muted", f"游戏目录：{values.get('game_dir', '')}")
         self.toolbox_page.set_game_dir(values.get("game_dir", ""))
         self.instance_page.set_active_dir(values.get("game_dir", ""))
+        self.start_page.set_environment(
+            str(values.get("java_path", "") or ""),
+            f"{values.get('max_mem', '自动')} / {values.get('min_mem', '自动')}",
+        )
         self.refresh_versions()
 
     def _on_developer_unlocked(self) -> None:

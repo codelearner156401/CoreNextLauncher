@@ -7,7 +7,7 @@ own Azure application registration in launcher_config.json
 """
 
 APP_NAME = "CoreNextLauncher"
-APP_VERSION = "1.7.0"
+APP_VERSION = "1.8.1"
 
 DEFAULT_MS_CLIENT_ID = "c36a9fb6-4f2a-41ff-90bd-ae7cc92031eb"
 

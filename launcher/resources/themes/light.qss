@@ -818,3 +818,60 @@ QSpinBox::down-button {
     border: none;
     background: transparent;
 }
+
+/* --- v1.8 frameless window / PCL start page ---------------------------- */
+QPushButton#WindowButton, QPushButton#WindowCloseButton {
+    background: transparent;
+    border: none;
+    border-radius: 7px;
+    color: #64748b;
+    font-size: 14px;
+    font-weight: 600;
+    padding: 0;
+}
+QPushButton#WindowButton:hover { background: rgba(15,23,42,0.08); color: #0f172a; }
+QPushButton#WindowCloseButton:hover { background: #e5484d; color: #ffffff; }
+
+QLabel#PageTitle {
+    font-size: 22px;
+    font-weight: 700;
+    color: #0f172a;
+}
+QLabel#Eyebrow {
+    color: #8290a8;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 2px;
+}
+QLabel#HeroTitle {
+    font-size: 34px;
+    font-weight: 800;
+    color: #0b1220;
+}
+QPushButton#HeroLaunch {
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+        stop:0 #2563eb, stop:1 #7c3aed);
+    border: 1px solid rgba(255,255,255,0.45);
+    border-radius: 12px;
+    color: #ffffff;
+    font-size: 17px;
+    font-weight: 700;
+}
+QPushButton#HeroLaunch:hover {
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+        stop:0 #3b76f0, stop:1 #8b5cf6);
+}
+QPushButton#HeroLaunch:pressed { padding-top: 2px; }
+QPushButton#HeroLaunch:disabled { background: #e2e8f0; color: #94a3b8; }
+
+QFrame#InfoCard {
+    background: rgba(255,255,255,0.62);
+    border: 1px solid rgba(15,23,42,0.08);
+    border-radius: 10px;
+}
+QLabel#InfoLabel { color: #7b879c; font-size: 10px; font-weight: 600; }
+QLabel#InfoValue { color: #1e293b; font-size: 12px; font-weight: 600; }
+
+/* v1.8.1 translucent acrylic window */
+QMainWindow { background: transparent; }
+QWidget#Root { background: transparent; }

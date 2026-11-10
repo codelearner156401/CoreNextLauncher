@@ -1,14 +1,15 @@
 """Workspace layout and portable runtime paths.
 
-Every installation keeps a single workspace in the user's Documents folder::
+Every installation keeps a single portable workspace next to the program::
 
-    Documents/CoreNextLauncher/
-    ├─ config/       launcher_config.json / account.json / secrets.json ...
-    ├─ kernel/       mc_core.exe and the managed Java runtime
-    ├─ instances/    one folder per Minecraft instance
-    ├─ cache/        downloads, server icons, update packages
-    ├─ logs/         launcher logs
-    └─ exports/      exported modpack output
+    CoreNextLauncher.exe
+    CoreNextLauncher/
+        config/       launcher_config.json / account.json / secrets.json ...
+        kernel/       mc_core.exe and the managed Java runtime
+        instances/    one folder per Minecraft instance
+        cache/        downloads, server icons, update packages
+        logs/         launcher logs
+        exports/      exported modpack output
 
 Set ``CORENEXTLAUNCHER_HOME`` to override the workspace root (used by the
 self-test suite and portable installations).
@@ -16,6 +17,7 @@ self-test suite and portable installations).
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import sys
@@ -83,11 +85,18 @@ def documents_dir() -> Path:
     return Path.home() / "Documents"
 
 
+def program_dir() -> Path:
+    """Directory that contains CoreNextLauncher.exe (or main.py in source mode)."""
+    if is_frozen():
+        return Path(sys.executable).resolve().parent
+    return app_root()
+
+
 def workspace_root() -> Path:
     override = os.environ.get(ENV_HOME, "").strip()
     if override:
         return Path(override).expanduser().resolve()
-    return documents_dir() / WORKSPACE_NAME
+    return program_dir() / WORKSPACE_NAME
 
 
 def config_dir() -> Path:
@@ -135,12 +144,15 @@ class Workspace:
 
 
 def _legacy_state_dirs() -> list[Path]:
-    """Old per-user locations that may still hold settings from 1.6.x."""
+    """Old per-user locations that may still hold settings from 1.6.x/1.7.x."""
     candidates: list[Path] = []
     roaming = os.environ.get("APPDATA")
     if roaming:
         candidates.append(Path(roaming) / WORKSPACE_NAME)
     candidates.append(Path.home() / f".{WORKSPACE_NAME.lower()}")
+    old_documents = documents_dir() / WORKSPACE_NAME
+    if old_documents != workspace_root():
+        candidates.append(old_documents)
     return candidates
 
 
@@ -167,13 +179,30 @@ def _migrate_legacy_config(workspace: Workspace) -> None:
                 source = old / name
                 if source.is_file() and not (workspace.config / name).exists():
                     shutil.copy2(source, workspace.config / name)
+            # v1.8 stores Minecraft data inside the portable workspace.  Keep
+            # the old account/theme/Java settings, but move the default game
+            # directory into instances/default instead of an external C: path.
+            if target.is_file():
+                try:
+                    raw = json.loads(target.read_text(encoding="utf-8"))
+                    configured = str(raw.get("game_dir") or "").strip()
+                    if configured:
+                        old_game = Path(configured).expanduser().resolve()
+                        if not old_game.is_relative_to(workspace.root.resolve()):
+                            raw["game_dir"] = str(workspace.instances / "default")
+                            target.write_text(
+                                json.dumps(raw, ensure_ascii=False, indent=2) + "\n",
+                                encoding="utf-8",
+                            )
+                except (OSError, ValueError, json.JSONDecodeError):
+                    pass
         except OSError:
             pass
         return
 
 
 def ensure_workspace() -> Workspace:
-    """Create the Documents workspace on first run and return its layout."""
+    """Create the portable workspace next to the program on first run."""
     root = workspace_root()
     workspace = Workspace(
         root=root,

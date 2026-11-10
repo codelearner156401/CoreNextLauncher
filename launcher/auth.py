@@ -31,6 +31,10 @@ class AuthError(RuntimeError):
     pass
 
 
+class AuthNetworkError(AuthError):
+    """Raised when Microsoft services cannot be reached."""
+
+
 def _request_json(
     url: str,
     data: bytes | None = None,
@@ -56,7 +60,7 @@ def _request_json(
         return exc.code, payload
     except (urllib.error.URLError, TimeoutError) as exc:
         reason = getattr(exc, "reason", exc)
-        raise AuthError(f"连接 Microsoft 服务失败：{reason}") from exc
+        raise AuthNetworkError(f"连接 Microsoft 服务失败：{reason}") from exc
 
 
 def _post_form(url: str, fields: dict[str, str]) -> tuple[int, dict]:
@@ -245,6 +249,7 @@ def complete_login(
         refresh_token=refresh_token,
         client_id=client_id,
         user_type="msa",
+        cached_at=time.time(),
     )
 
 

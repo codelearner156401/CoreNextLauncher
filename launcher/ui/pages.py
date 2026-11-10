@@ -11,6 +11,7 @@ from PySide6.QtGui import QColor, QDesktopServices, QLinearGradient, QPainter, Q
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
+    QColorDialog,
     QComboBox,
     QFileDialog,
     QFormLayout,
@@ -31,10 +32,11 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .. import theme
+from .. import anim, theme
 from ..constants import APP_NAME, APP_VERSION
 from ..dev_state import DeveloperState
 from ..services import ai_diag
+from ..services import catalog
 from ..services import java_scan
 from ..services import jvm
 from .tasks import start_task
@@ -162,6 +164,7 @@ class SettingsPage(QWidget):
     developer_unlocked = Signal()
     developer_state_changed = Signal()
     appearance_changed = Signal()
+    animation_speed_changed = Signal(float)
     check_update_requested = Signal()
 
     def __init__(self, config, parent=None) -> None:
@@ -172,6 +175,12 @@ class SettingsPage(QWidget):
         self._dev_unlocked = False
         self._version_clicks = 0
         self._background_path = ""
+        self._splash_path = ""
+        self._theme_profiles: dict = {}
+        self._active_style = "liquid"
+        self.animation_speed = 1.0
+        self._primary_color = "#4f8cff"
+        self._accent_color = "#7b5cff"
         self._memory_adjusted = False
         self._build()
         self.apply_config(config)
@@ -689,35 +698,74 @@ class SettingsPage(QWidget):
 
     def _build_appearance_card(self) -> QFrame:
         card, layout = _card(
-            "外观 · 液态玻璃",
-            "主题切换立即生效；选择一张本地图片作为背景，面板会像亚克力一样实时模糊身后的画面。",
+            "主题 · 界面风格",
+            "三套界面独立保存配色、毛玻璃开关、模糊强度与启动图；切换立即生效。",
         )
-        row = QHBoxLayout()
-        row.setSpacing(12)
-        row.addWidget(_field("界面主题"))
-        self.theme_combo = QComboBox()
-        for key in theme.THEME_ORDER:
-            self.theme_combo.addItem(theme.THEME_LABELS[key], key)
-        self.theme_combo.setFixedWidth(160)
-        self.theme_combo.currentIndexChanged.connect(self._on_theme_index)
-        row.addWidget(self.theme_combo)
-        row.addStretch(1)
-        hint = QLabel("暗黑 / 明亮两套 QSS 主题")
-        hint.setObjectName("Hint")
-        row.addWidget(hint)
-        layout.addLayout(row)
+
+        style_row = QHBoxLayout()
+        style_row.setSpacing(12)
+        style_row.addWidget(_field("界面风格"))
+        self.style_combo = QComboBox()
+        for key in theme.STYLE_ORDER:
+            self.style_combo.addItem(theme.STYLE_LABELS[key], key)
+        self.style_combo.setFixedWidth(160)
+        self.style_combo.currentIndexChanged.connect(self._on_style_changed)
+        style_row.addWidget(self.style_combo)
+        style_row.addStretch(1)
+        style_hint = QLabel("液态玻璃 / 毛玻璃 / HTML 风格，各自独立记忆设置")
+        style_hint.setObjectName("Hint")
+        style_row.addWidget(style_hint)
+        layout.addLayout(style_row)
+
+        color_row = QHBoxLayout()
+        color_row.setSpacing(10)
+        color_row.addWidget(_field("配色"))
+        self.color_preset = QComboBox()
+        for key in theme.COLOR_PRESETS:
+            self.color_preset.addItem(theme.PRESET_LABELS.get(key, key), key)
+        self.color_preset.setFixedWidth(120)
+        self.color_preset.currentIndexChanged.connect(self._on_preset_changed)
+        color_row.addWidget(self.color_preset)
+        self.primary_button = QPushButton("#4f8cff")
+        self.primary_button.setObjectName("ColorSwatch")
+        self.primary_button.setFixedWidth(110)
+        self.primary_button.setToolTip("自定义主色调")
+        self.primary_button.clicked.connect(self._pick_primary)
+        color_row.addWidget(self.primary_button)
+        self.accent_button = QPushButton("#7b5cff")
+        self.accent_button.setObjectName("ColorSwatch")
+        self.accent_button.setFixedWidth(110)
+        self.accent_button.setToolTip("自定义辅助色")
+        self.accent_button.clicked.connect(self._pick_accent)
+        color_row.addWidget(self.accent_button)
+        color_row.addStretch(1)
+        layout.addLayout(color_row)
 
         glass_row = QHBoxLayout()
-        glass_row.setSpacing(12)
-        self.glass_check = QCheckBox("启用液态玻璃（实时背景模糊）")
+        glass_row.setSpacing(14)
+        self.glass_check = QCheckBox("面板毛玻璃")
         self.glass_check.setChecked(True)
         self.glass_check.toggled.connect(self._on_glass_toggled)
         glass_row.addWidget(self.glass_check)
+        self.system_blur_check = QCheckBox("全局背景模糊（系统级）")
+        self.system_blur_check.setChecked(True)
+        self.system_blur_check.toggled.connect(self._on_glass_toggled)
+        glass_row.addWidget(self.system_blur_check)
+        self.loading_check = QCheckBox("启用启动加载动画")
+        self.loading_check.setChecked(True)
+        self.loading_check.toggled.connect(self._on_loading_toggled)
+        glass_row.addWidget(self.loading_check)
         glass_row.addStretch(1)
-        glass_hint = QLabel("关闭后恢复实色面板")
-        glass_hint.setObjectName("Hint")
-        glass_row.addWidget(glass_hint)
         layout.addLayout(glass_row)
+
+        self.blur_slider, self.blur_value = self._slider_row(
+            layout, "玻璃模糊", 0, 48, 26, "px"
+        )
+        self.dim_slider, self.dim_value = self._slider_row(
+            layout, "背景遮罩", 0, 80, 42, "%"
+        )
+        self.blur_slider.valueChanged.connect(self._on_blur_changed)
+        self.dim_slider.valueChanged.connect(self._on_dim_changed)
 
         background_row = QHBoxLayout()
         background_row.setSpacing(14)
@@ -737,10 +785,9 @@ class SettingsPage(QWidget):
         self.background_meta.setObjectName("Hint")
         self.background_meta.setWordWrap(True)
         background_text.addWidget(self.background_meta)
-
         background_buttons = QHBoxLayout()
         background_buttons.setSpacing(8)
-        self.background_button = QPushButton("选择图片…")
+        self.background_button = QPushButton("选择背景…")
         self.background_button.setObjectName("Primary")
         self.background_button.clicked.connect(self._browse_background)
         background_buttons.addWidget(self.background_button)
@@ -753,20 +800,45 @@ class SettingsPage(QWidget):
         background_row.addLayout(background_text, 1)
         layout.addLayout(background_row)
 
-        self.blur_slider, self.blur_value = self._slider_row(
-            layout, "玻璃模糊", 0, 48, 26, "px"
+        splash_row = QHBoxLayout()
+        splash_row.setSpacing(14)
+        self.splash_preview = QLabel()
+        self.splash_preview.setObjectName("BackgroundPreview")
+        self.splash_preview.setFixedSize(156, 88)
+        self.splash_preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.splash_preview.setToolTip("启动画面预览")
+        splash_row.addWidget(self.splash_preview)
+        splash_text = QVBoxLayout()
+        splash_text.setSpacing(4)
+        self.splash_label = QLabel("默认加载动画")
+        self.splash_label.setObjectName("SectionTitle")
+        splash_text.addWidget(self.splash_label)
+        splash_meta = QLabel("启动时展示自定义图片；未设置时显示旋转 C 图标加载动画")
+        splash_meta.setObjectName("Hint")
+        splash_meta.setWordWrap(True)
+        splash_text.addWidget(splash_meta)
+        splash_buttons = QHBoxLayout()
+        splash_buttons.setSpacing(8)
+        self.splash_button = QPushButton("选择启动图…")
+        self.splash_button.setObjectName("Primary")
+        self.splash_button.clicked.connect(self._browse_splash)
+        splash_buttons.addWidget(self.splash_button)
+        self.splash_clear = QPushButton("恢复默认")
+        self.splash_clear.setObjectName("Ghost")
+        self.splash_clear.clicked.connect(self._clear_splash)
+        splash_buttons.addWidget(self.splash_clear)
+        splash_buttons.addStretch(1)
+        splash_text.addLayout(splash_buttons)
+        splash_row.addLayout(splash_text, 1)
+        layout.addLayout(splash_row)
+
+        note = QLabel(
+            "无自定义背景时默认开启系统级背景模糊；上传背景图后可自行选择是否保留模糊。"
+            "所有主题参数按风格独立保存，关闭程序后仍会保留。"
         )
-        self.dim_slider, self.dim_value = self._slider_row(
-            layout, "背景遮罩", 0, 80, 42, "%"
-        )
-        self.blur_slider.valueChanged.connect(self._on_blur_changed)
-        self.dim_slider.valueChanged.connect(self._on_dim_changed)
-        appearance_note = QLabel(
-            "模糊强度决定玻璃面板身后画面的虚化程度；背景遮罩用于保证文字对比度。设置会即时预览并自动保存。"
-        )
-        appearance_note.setObjectName("Hint")
-        appearance_note.setWordWrap(True)
-        layout.addWidget(appearance_note)
+        note.setObjectName("Hint")
+        note.setWordWrap(True)
+        layout.addWidget(note)
         self._sync_appearance_widgets()
         return card
 
@@ -798,24 +870,181 @@ class SettingsPage(QWidget):
         layout.addLayout(row)
         return slider, value_label
 
+    # --------------------------------------------------------- theme model
+    def _profile_defaults(self, style: str) -> dict:
+        base = theme.STYLE_BASE.get(style, "dark")
+        primary, accent = theme.COLOR_PRESETS["blue"]
+        if style in ("frosted", "html"):
+            primary, accent = "#2563eb", "#7c3aed"
+        return {
+            "color": "blue",
+            "primary": primary,
+            "accent": accent,
+            "base": base,
+            "glass": style != "html",
+            "system_blur": True,
+            "blur": 26 if style == "liquid" else (34 if style == "frosted" else 0),
+            "dim": 42 if style == "liquid" else (30 if style == "frosted" else 0),
+            "background": "",
+            "splash": "",
+        }
+
+    def _profile(self) -> dict:
+        style = self._active_style
+        profile = self._theme_profiles.get(style)
+        if not isinstance(profile, dict):
+            profile = self._profile_defaults(style)
+            self._theme_profiles[style] = profile
+        return profile
+
+    def _save_profile(self) -> None:
+        if not hasattr(self, "glass_check"):
+            return
+        style = self._active_style
+        profile = self._profile()
+        profile.update(
+            {
+                "color": str(self.color_preset.currentData() or "custom"),
+                "primary": self._primary_color,
+                "accent": self._accent_color,
+                "base": theme.STYLE_BASE.get(style, "dark"),
+                "glass": self.glass_check.isChecked(),
+                "system_blur": self.system_blur_check.isChecked(),
+                "blur": self.blur_slider.value(),
+                "dim": self.dim_slider.value(),
+                "background": self._background_path,
+                "splash": self._splash_path,
+            }
+        )
+
+    def _apply_profile(self) -> None:
+        profile = self._profile()
+        self._loading_settings = True
+        try:
+            index = self.style_combo.findData(self._active_style)
+            self.style_combo.blockSignals(True)
+            self.style_combo.setCurrentIndex(max(0, index))
+            self.style_combo.blockSignals(False)
+            self._primary_color = str(profile.get("primary") or "#4f8cff")
+            self._accent_color = str(profile.get("accent") or "#7b5cff")
+            self._set_color_button(self.primary_button, self._primary_color)
+            self._set_color_button(self.accent_button, self._accent_color)
+            color = str(profile.get("color") or "custom")
+            ci = self.color_preset.findData(color)
+            self.color_preset.blockSignals(True)
+            if ci < 0:
+                self.color_preset.addItem("自定义", "custom")
+                ci = self.color_preset.findData("custom")
+            self.color_preset.setCurrentIndex(max(0, ci))
+            self.color_preset.blockSignals(False)
+            self.glass_check.blockSignals(True)
+            self.glass_check.setChecked(bool(profile.get("glass", True)))
+            self.glass_check.blockSignals(False)
+            self.system_blur_check.blockSignals(True)
+            self.system_blur_check.setChecked(bool(profile.get("system_blur", True)))
+            self.system_blur_check.blockSignals(False)
+            self.blur_slider.blockSignals(True)
+            self.blur_slider.setValue(int(profile.get("blur", 26) or 0))
+            self.blur_slider.blockSignals(False)
+            self.dim_slider.blockSignals(True)
+            self.dim_slider.setValue(int(profile.get("dim", 42) or 0))
+            self.dim_slider.blockSignals(False)
+            self._background_path = str(profile.get("background") or "")
+            self._splash_path = str(profile.get("splash") or "")
+            self._update_background_preview()
+            self._update_splash_preview()
+            self._sync_appearance_widgets()
+        finally:
+            self._loading_settings = False
+
+    def _set_color_button(self, button: QPushButton, color: str) -> None:
+        value = QColor(color)
+        text = "#ffffff" if value.lightness() < 150 else "#0f172a"
+        button.setText(color.upper())
+        button.setStyleSheet(
+            f"QPushButton#ColorSwatch {{ background-color: {color}; color: {text}; "
+            f"border: 1px solid rgba(255,255,255,0.25); border-radius: 8px; "
+            f"padding: 6px 10px; font-weight: 600; }}"
+        )
+
+    def _on_style_changed(self, _index: int) -> None:
+        if self._loading_settings:
+            return
+        style = str(self.style_combo.currentData() or "liquid")
+        if style == self._active_style:
+            return
+        self._save_profile()
+        self._active_style = style
+        self._apply_profile()
+        self.appearance_changed.emit()
+
+    def _on_preset_changed(self, _index: int) -> None:
+        if self._loading_settings:
+            return
+        key = str(self.color_preset.currentData() or "custom")
+        if key == "custom":
+            return
+        base = theme.STYLE_BASE.get(self._active_style, "dark")
+        self._primary_color, self._accent_color = theme.preset_colors(key, base)
+        self._set_color_button(self.primary_button, self._primary_color)
+        self._set_color_button(self.accent_button, self._accent_color)
+        self._save_profile()
+        self.appearance_changed.emit()
+
+    def _pick_color(self, which: str) -> None:
+        current = self._primary_color if which == "primary" else self._accent_color
+        color = QColorDialog.getColor(QColor(current), self, "选择颜色")
+        if not color.isValid():
+            return
+        if which == "primary":
+            self._primary_color = color.name()
+            self._set_color_button(self.primary_button, self._primary_color)
+        else:
+            self._accent_color = color.name()
+            self._set_color_button(self.accent_button, self._accent_color)
+        self.color_preset.blockSignals(True)
+        ci = self.color_preset.findData("custom")
+        if ci < 0:
+            self.color_preset.addItem("自定义", "custom")
+            ci = self.color_preset.findData("custom")
+        self.color_preset.setCurrentIndex(max(0, ci))
+        self.color_preset.blockSignals(False)
+        self._save_profile()
+        self.appearance_changed.emit()
+
+    def _pick_primary(self) -> None:
+        self._pick_color("primary")
+
+    def _pick_accent(self) -> None:
+        self._pick_color("accent")
+
+    def _on_loading_toggled(self, _checked: bool) -> None:
+        if not self._loading_settings:
+            self.appearance_changed.emit()
+
     def _sync_appearance_widgets(self) -> None:
-        self.blur_slider.setEnabled(self.glass_check.isChecked())
+        enabled = self.glass_check.isChecked() or self.system_blur_check.isChecked()
+        self.blur_slider.setEnabled(enabled)
+        self.dim_slider.setEnabled(enabled)
         self.blur_value.setText(f"{self.blur_slider.value()}px")
         self.dim_value.setText(f"{self.dim_slider.value()}%")
 
     def _on_glass_toggled(self, _checked: bool) -> None:
         self._sync_appearance_widgets()
         if not self._loading_settings:
+            self._save_profile()
             self.appearance_changed.emit()
 
     def _on_blur_changed(self, value: int) -> None:
         self.blur_value.setText(f"{value}px")
         if not self._loading_settings:
+            self._save_profile()
             self.appearance_changed.emit()
 
     def _on_dim_changed(self, value: int) -> None:
         self.dim_value.setText(f"{value}%")
         if not self._loading_settings:
+            self._save_profile()
             self.appearance_changed.emit()
 
     def _browse_background(self) -> None:
@@ -838,6 +1067,18 @@ class SettingsPage(QWidget):
             return
         self._background_path = chosen
         self._update_background_preview()
+        if not self.glass_check.isChecked() and not self.system_blur_check.isChecked():
+            answer = QMessageBox.question(
+                self,
+                "启用毛玻璃模糊",
+                "已设置自定义背景图。是否同时开启毛玻璃 / 系统背景模糊？",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.Yes,
+            )
+            if answer == QMessageBox.StandardButton.Yes:
+                self.glass_check.setChecked(True)
+                self.system_blur_check.setChecked(True)
+        self._save_profile()
         if not self._loading_settings:
             self.appearance_changed.emit()
 
@@ -846,6 +1087,7 @@ class SettingsPage(QWidget):
             return
         self._background_path = ""
         self._update_background_preview()
+        self._save_profile()
         if not self._loading_settings:
             self.appearance_changed.emit()
 
@@ -867,7 +1109,7 @@ class SettingsPage(QWidget):
             self.background_label.setText(Path(path).name)
             self.background_label.setToolTip(path)
             self.background_meta.setText(
-                f"{pixmap.width()}×{pixmap.height()} · 已应用，点击“选择图片…”可更换"
+                f"{pixmap.width()}×{pixmap.height()} · 已应用，点击“选择背景…”可更换"
             )
             self.background_clear.setEnabled(True)
             return
@@ -899,8 +1141,70 @@ class SettingsPage(QWidget):
         self.background_meta.setText("未选择图片 · 支持 JPG / PNG / WebP / GIF")
         self.background_clear.setEnabled(False)
 
+    def _browse_splash(self) -> None:
+        start = self._splash_path or str(Path.home() / "Pictures")
+        chosen, _ = QFileDialog.getOpenFileName(
+            self,
+            "选择启动画面图片",
+            start,
+            "图片 (*.png *.jpg *.jpeg *.webp *.bmp);;所有文件 (*)",
+        )
+        if not chosen:
+            return
+        if QPixmap(chosen).isNull():
+            QMessageBox.warning(self, "无法读取图片", "这个文件不是受支持的图片。")
+            return
+        self._splash_path = chosen
+        self._update_splash_preview()
+        self._save_profile()
+        if not self._loading_settings:
+            self.appearance_changed.emit()
+
+    def _clear_splash(self) -> None:
+        self._splash_path = ""
+        self._update_splash_preview()
+        self._save_profile()
+        if not self._loading_settings:
+            self.appearance_changed.emit()
+
+    def _update_splash_preview(self) -> None:
+        size = self.splash_preview.size()
+        path = self._splash_path
+        pixmap = QPixmap(path) if path else QPixmap()
+        if not pixmap.isNull():
+            scaled = pixmap.scaled(
+                size,
+                Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+            x = max(0, (scaled.width() - size.width()) // 2)
+            y = max(0, (scaled.height() - size.height()) // 2)
+            self.splash_preview.setPixmap(scaled.copy(x, y, size.width(), size.height()))
+            self.splash_label.setText(Path(path).name)
+            self.splash_clear.setEnabled(True)
+            return
+        thumb = QPixmap(size)
+        thumb.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(thumb)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        gradient = QLinearGradient(0, 0, size.width(), size.height())
+        gradient.setColorAt(0.0, QColor(self._primary_color))
+        gradient.setColorAt(1.0, QColor(self._accent_color))
+        painter.fillRect(thumb.rect(), gradient)
+        painter.setPen(QColor("#ffffff"))
+        font = painter.font()
+        font.setPointSize(18)
+        font.setBold(True)
+        painter.setFont(font)
+        painter.drawText(thumb.rect(), Qt.AlignmentFlag.AlignCenter, "C")
+        painter.end()
+        self.splash_preview.setPixmap(thumb)
+        self.splash_label.setText("默认加载动画")
+        self.splash_clear.setEnabled(False)
+
     def refresh_appearance_theme(self) -> None:
         self._update_background_preview()
+        self._update_splash_preview()
 
     def _build_automation_card(self) -> QFrame:
         card, layout = _card(
@@ -1064,6 +1368,25 @@ class SettingsPage(QWidget):
         panel = QVBoxLayout(self.dev_panel)
         panel.setContentsMargins(12, 10, 12, 10)
         panel.setSpacing(8)
+        speed_row = QHBoxLayout()
+        speed_row.setSpacing(10)
+        speed_row.addWidget(_field("动画速度"))
+        self.animation_speed_slider = QSlider(Qt.Orientation.Horizontal)
+        self.animation_speed_slider.setRange(20, 250)
+        self.animation_speed_slider.setValue(100)
+        self.animation_speed_slider.setMinimumWidth(200)
+        self.animation_speed_slider.valueChanged.connect(self._on_animation_speed_changed)
+        speed_row.addWidget(self.animation_speed_slider, 1)
+        self.animation_speed_label = QLabel("1.0x")
+        self.animation_speed_label.setObjectName("SliderValue")
+        self.animation_speed_label.setFixedWidth(54)
+        speed_row.addWidget(self.animation_speed_label)
+        panel.addLayout(speed_row)
+        speed_hint = QLabel("范围 0.2x–2.5x；过快可能导致界面卡顿，过慢会影响操作。")
+        speed_hint.setObjectName("Hint")
+        speed_hint.setWordWrap(True)
+        panel.addWidget(speed_hint)
+
         self.offline_check = QCheckBox("启用离线模式（不进行正版登录）")
         self.offline_check.setChecked(False)
         self.offline_check.toggled.connect(self._on_offline_toggled)
@@ -1218,6 +1541,16 @@ class SettingsPage(QWidget):
         self.min_mem_combo.setCurrentText(advice.min_text)
         self.memory_hint.setText(advice.reason)
 
+    def _on_animation_speed_changed(self, value: int) -> None:
+        self.animation_speed = anim.set_speed(value / 100.0)
+        self._update_animation_speed_label()
+        if not self._loading_settings:
+            self.animation_speed_changed.emit(self.animation_speed)
+
+    def _update_animation_speed_label(self) -> None:
+        if hasattr(self, "animation_speed_label"):
+            self.animation_speed_label.setText(f"{self.animation_speed:.2f}x")
+
     def _toggle_developer(self, checked: bool) -> None:
         self.dev_panel.setVisible(checked)
         self.dev_toggle.setArrowType(
@@ -1254,20 +1587,14 @@ class SettingsPage(QWidget):
             self._offline_ack = True
         self.developer_state_changed.emit()
 
-    def _on_theme_index(self, _index: int) -> None:
-        key = self.theme_combo.currentData()
-        if key:
-            self.theme_changed.emit(str(key))
-
     def set_theme_key(self, key: str) -> None:
-        """Keep the combo in sync when the theme is changed externally."""
-        index = self.theme_combo.findData(key)
-        if index < 0:
+        """Legacy API: map old dark/light keys onto the liquid style."""
+        style = key if key in theme.STYLE_ORDER else "liquid"
+        if style == self._active_style:
             return
-        self.theme_combo.blockSignals(True)
-        self.theme_combo.setCurrentIndex(index)
-        self.theme_combo.blockSignals(False)
-        self.refresh_appearance_theme()
+        self._save_profile()
+        self._active_style = style
+        self._apply_profile()
 
     def showEvent(self, event) -> None:  # noqa: N802
         super().showEvent(event)
@@ -1287,17 +1614,25 @@ class SettingsPage(QWidget):
             self.min_mem_combo.blockSignals(True)
             self.min_mem_combo.setCurrentText(max_mem)
             self.min_mem_combo.blockSignals(False)
+        self._save_profile()
+        active = self._profile()
         return {
             "game_dir": self.game_dir_edit.text().strip(),
             "java_path": self.java_path(),
             "max_mem": max_mem,
             "min_mem": min_mem,
             "player_name": self.player_edit.text().strip() or "Steve",
-            "theme": self.theme_combo.currentData() or "dark",
-            "background_image": self._background_path,
-            "glass_enabled": self.glass_check.isChecked(),
-            "glass_blur": self.blur_slider.value(),
-            "background_dim": self.dim_slider.value(),
+            "theme": str(active.get("base") or "dark"),
+            "background_image": str(active.get("background") or ""),
+            "glass_enabled": bool(active.get("glass", True)),
+            "glass_blur": int(active.get("blur", 26) or 0),
+            "background_dim": int(active.get("dim", 42) or 0),
+            "ui_style": self._active_style,
+            "theme_profiles": {k: dict(v) for k, v in self._theme_profiles.items()},
+            "loading_animation": self.loading_check.isChecked(),
+            "animation_speed": float(
+                getattr(self, "animation_speed", 1.0)
+            ),
             "auto_backup": self.auto_backup_check.isChecked(),
             "backup_keep": self.backup_keep_spin.value(),
             "update_repo": self.update_repo_edit.text().strip(),
@@ -1318,27 +1653,24 @@ class SettingsPage(QWidget):
             self._set_memory(self.max_mem_combo, config.max_mem)
             self._set_memory(self.min_mem_combo, getattr(config, "min_mem", "auto"))
             self.player_edit.setText(config.player_name)
-            theme_index = self.theme_combo.findData(config.theme)
-            self.theme_combo.blockSignals(True)
-            self.theme_combo.setCurrentIndex(max(0, theme_index))
-            self.theme_combo.blockSignals(False)
-
-            background = str(getattr(config, "background_image", "") or "")
-            self._background_path = background if background and Path(background).is_file() else ""
-            self.glass_check.blockSignals(True)
-            self.glass_check.setChecked(bool(getattr(config, "glass_enabled", True)))
-            self.glass_check.blockSignals(False)
-            self.blur_slider.blockSignals(True)
-            self.blur_slider.setValue(max(0, min(48, int(getattr(config, "glass_blur", 26)))))
-            self.blur_slider.blockSignals(False)
-            self.dim_slider.blockSignals(True)
-            self.dim_slider.setValue(
-                max(0, min(80, int(getattr(config, "background_dim", 42))))
-            )
-            self.dim_slider.blockSignals(False)
-            self._update_background_preview()
-            self._sync_appearance_widgets()
-
+            profiles = getattr(config, "theme_profiles", {})
+            self._theme_profiles = {
+                key: dict(value) for key, value in profiles.items() if isinstance(value, dict)
+            } if isinstance(profiles, dict) else {}
+            style = str(getattr(config, "ui_style", "liquid") or "liquid")
+            if style not in theme.STYLE_ORDER:
+                style = "liquid"
+            self._active_style = style
+            self._apply_profile()
+            self.loading_check.blockSignals(True)
+            self.loading_check.setChecked(bool(getattr(config, "loading_animation", True)))
+            self.loading_check.blockSignals(False)
+            self.animation_speed = anim.clamp(getattr(config, "animation_speed", 1.0))
+            if hasattr(self, "animation_speed_slider"):
+                self.animation_speed_slider.blockSignals(True)
+                self.animation_speed_slider.setValue(int(round(self.animation_speed * 100)))
+                self.animation_speed_slider.blockSignals(False)
+                self._update_animation_speed_label()
             self.auto_backup_check.setChecked(bool(getattr(config, "auto_backup", True)))
             self.backup_keep_spin.setValue(int(getattr(config, "backup_keep", 5) or 5))
             self.update_repo_edit.setText(str(getattr(config, "update_repo", "") or ""))
@@ -1408,6 +1740,48 @@ class InstallPage(QWidget):
         subtitle.setWordWrap(True)
         header.addWidget(subtitle)
         outer.addLayout(header)
+
+        catalog_card, catalog_layout = _card(
+            "浏览官方版本",
+            "直接从 Mojang 版本清单浏览正式版与快照，选择后即可下载安装。",
+        )
+        filter_row = QHBoxLayout()
+        filter_row.setSpacing(8)
+        self.catalog_filter = QComboBox()
+        self.catalog_filter.addItem("全部版本", "all")
+        self.catalog_filter.addItem("正式版", "release")
+        self.catalog_filter.addItem("快照", "snapshot")
+        self.catalog_filter.addItem("旧版", "old")
+        self.catalog_filter.setFixedWidth(120)
+        self.catalog_filter.currentIndexChanged.connect(self._fill_catalog)
+        filter_row.addWidget(self.catalog_filter)
+        self.catalog_search = QLineEdit()
+        self.catalog_search.setPlaceholderText("搜索版本号…")
+        self.catalog_search.textChanged.connect(self._fill_catalog)
+        filter_row.addWidget(self.catalog_search, 1)
+        self.catalog_refresh = QPushButton("刷新列表")
+        self.catalog_refresh.setObjectName("Ghost")
+        self.catalog_refresh.clicked.connect(self.load_catalog)
+        filter_row.addWidget(self.catalog_refresh)
+        self.catalog_install = QPushButton("安装选中版本")
+        self.catalog_install.setObjectName("Primary")
+        self.catalog_install.setEnabled(False)
+        self.catalog_install.clicked.connect(self._install_catalog_selection)
+        filter_row.addWidget(self.catalog_install)
+        catalog_layout.addLayout(filter_row)
+
+        self.catalog_list = QListWidget()
+        self.catalog_list.setObjectName("CatalogList")
+        self.catalog_list.setMaximumHeight(150)
+        self.catalog_list.itemSelectionChanged.connect(self._on_catalog_selected)
+        self.catalog_list.itemDoubleClicked.connect(
+            lambda _item: self._install_catalog_selection()
+        )
+        catalog_layout.addWidget(self.catalog_list)
+        self.catalog_status = QLabel("打开此页后自动加载 Mojang 官方版本清单")
+        self.catalog_status.setObjectName("Hint")
+        catalog_layout.addWidget(self.catalog_status)
+        outer.addWidget(catalog_card)
 
         install_card, install_layout = _card("官方源安装")
         row = QHBoxLayout()
@@ -1512,6 +1886,90 @@ class InstallPage(QWidget):
         self.stack.addWidget(self.content_scroll)
 
     # -------------------------------------------------------------- install UI
+    def showEvent(self, event) -> None:  # noqa: N802
+        super().showEvent(event)
+        if not getattr(self, "_catalog_entries", None) and not getattr(
+            self, "_catalog_loading", False
+        ):
+            QTimer.singleShot(50, self.load_catalog)
+
+    def load_catalog(self) -> None:
+        if getattr(self, "_catalog_loading", False):
+            return
+        self._catalog_loading = True
+        self.catalog_refresh.setEnabled(False)
+        self.catalog_status.setText("正在获取 Mojang 官方版本清单…")
+        start_task(
+            self,
+            lambda progress, cancel: catalog.fetch_versions(),
+            on_done=self._on_catalog_loaded,
+            on_failed=self._on_catalog_failed,
+        )
+
+    def _on_catalog_loaded(self, entries) -> None:
+        self._catalog_loading = False
+        self.catalog_refresh.setEnabled(True)
+        self._catalog_entries = list(entries or [])
+        self._fill_catalog()
+        self.catalog_status.setText(f"已加载 {len(self._catalog_entries)} 个官方版本")
+
+    def _on_catalog_failed(self, message: str) -> None:
+        self._catalog_loading = False
+        self.catalog_refresh.setEnabled(True)
+        self.catalog_status.setText(f"获取版本清单失败：{message}")
+        self.log_requested.emit("warn", f"获取 Mojang 版本清单失败：{message}")
+
+    def _fill_catalog(self) -> None:
+        entries = getattr(self, "_catalog_entries", [])
+        mode = str(self.catalog_filter.currentData() or "all")
+        query = self.catalog_search.text().strip().lower()
+        self.catalog_list.blockSignals(True)
+        self.catalog_list.clear()
+        shown = 0
+        for entry in entries:
+            if mode == "old":
+                if entry.type not in ("old_beta", "old_alpha"):
+                    continue
+            elif mode != "all" and entry.type != mode:
+                continue
+            if query and query not in entry.id.lower():
+                continue
+            label = entry.id
+            if entry.type == "snapshot":
+                label += "  · 快照"
+            elif entry.type in ("old_beta", "old_alpha"):
+                label += "  · 旧版"
+            item = QListWidgetItem(label)
+            item.setData(Qt.ItemDataRole.UserRole, entry)
+            self.catalog_list.addItem(item)
+            shown += 1
+        self.catalog_list.blockSignals(False)
+        self.catalog_install.setEnabled(False)
+        if entries:
+            self.catalog_status.setText(f"显示 {shown} / {len(entries)} 个版本")
+
+    def _on_catalog_selected(self) -> None:
+        items = self.catalog_list.selectedItems()
+        if not items:
+            self.catalog_install.setEnabled(False)
+            return
+        entry = items[0].data(Qt.ItemDataRole.UserRole)
+        if entry is None:
+            return
+        self.install_version_edit.setText(entry.id)
+        self.catalog_install.setEnabled(True)
+        self.catalog_status.setText(f"已选择 {entry.id} · {entry.release_time[:10]}")
+
+    def _install_catalog_selection(self) -> None:
+        items = self.catalog_list.selectedItems()
+        if not items:
+            return
+        entry = items[0].data(Qt.ItemDataRole.UserRole)
+        if entry is None:
+            return
+        self.install_version_edit.setText(entry.id)
+        self.install_requested.emit(entry.id)
+
     def _emit_install(self) -> None:
         version_id = self.install_version_edit.text().strip()
         if not version_id:

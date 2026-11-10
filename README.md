@@ -11,7 +11,7 @@ CoreNextLauncher 的全部源代码由 DeepSeek 大模型编写。
 > **不提供、不分发、不托管任何 Minecraft 游戏本体、客户端 JAR、资源文件或破解内容。**
 > 使用前请阅读 [免责声明](DISCLAIMER.md)。
 
-`版本 1.7.0` · `Windows 10/11` · `MIT License`
+`版本 1.8.1` · `Windows 10/11` · `MIT License`
 
 ---
 
@@ -43,6 +43,16 @@ CoreNextLauncher 是一个面向 Windows 的 Minecraft 启动器，采用「C++ 
 
 ## 功能特性
 
+### v1.8.1 背景增强
+
+- 无边框窗口同时使用 Windows 11 `DWMWA_SYSTEMBACKDROP_TYPE`（Acrylic）与
+  Windows 10 `SetWindowCompositionAttribute` 两套系统级模糊实现，失败时自动
+  回退为实色面板。
+- 窗口背景、面板与标题区域改为真正的半透明叠加，能透出桌面壁纸与下层窗口的
+  光线，而不只是模糊启动器自己的背景图。
+- 降低背景底色与面板不透明度，保留文字可读性的同时增强“透过桌面的光”的毛玻璃
+  观感。
+
 ### 账号与启动
 
 - **Microsoft 正版登录**：设备码授权流程，令牌自动刷新，使用 Windows DPAPI 加密保存。
@@ -55,7 +65,7 @@ CoreNextLauncher 是一个面向 Windows 的 Minecraft 启动器，采用「C++ 
 
 ### 实例与性能
 
-- **实例管理**：在文档工作区的 `instances/` 下创建独立游戏目录；支持一键克隆（复制版本、Mod 与配置，可选是否复制存档），切换实例互不影响。
+- **实例管理**：在程序目录工作区的 `instances/` 下创建独立游戏目录；支持一键克隆（复制版本、Mod 与配置，可选是否复制存档），切换实例互不影响。
 - **Mod 批量管理**：Mod 列表支持 Ctrl / Shift 多选后批量启用或禁用；冲突检测覆盖重复 Mod ID、同名 jar、缺失前置，以及“前置已安装但被禁用”。
 - **内存推荐**：按物理内存自动推荐 Xmx / Xms，并为系统、显卡与其他程序预留空间。
 - **JVM 可视化编辑器**：G1GC / ZGC / 预触碰 / 并行引用 / 强制 UTF-8 开关，支持预设、自定义参数与“按硬件推荐”；参数随启动命令传给 C++ 内核。
@@ -76,13 +86,17 @@ CoreNextLauncher 是一个面向 Windows 的 Minecraft 启动器，采用「C++ 
 - **AI 诊断**：填写 DeepSeek API Key 后，将日志、崩溃报告、Mod 列表与 Java/内存设置发送给 DeepSeek，返回结构化的原因分析与修复步骤。Key 使用 DPAPI 加密保存在本机。
 - **在线更新**：配置 GitHub 仓库后，通过 Releases API 比对版本，下载新 exe 并由 `.bat` 脚本在程序退出后替换、重启。
 
-### 界面与体验
+### 界面与体验（v1.8）
 
-- QStackedWidget 单页淡入切换：旧页立即隐藏，新页 200ms 透明度 0→1，页面不会重叠。
-- 底部固定启动栏；启动按钮 1.05× 悬停放大、0.93× 按压、OutBack 回弹与发光阴影。
-- 自定义背景图、实时液态玻璃（亚克力）效果、暗黑/明亮双主题。
-- 高 DPI 适配：支持 2K/4K 与 Windows 125%/150% 缩放。
-- 隐藏开发者入口：设置页底部版本号连续点击 7 次解锁，默认不展示；开发者模式与离线模式**仅在本次运行有效**，关闭启动器后自动关闭（详见[风险声明](#开发者模式与离线模式风险声明)）。
+- **三套界面风格**：液态玻璃 / 毛玻璃 / HTML；每套风格独立保存配色、毛玻璃开关、模糊强度、背景图与启动图，切换即时生效、无需重启。
+- **PCL 风格滑动切换**：页面切换改为水平滑入，移除全部淡入淡出；全局动画速度支持 0.2x–2.5x 调节（设置 → 开发者选项）。
+- **无边框毛玻璃窗口**：移除系统标题栏，内置最小化 / 最大化 / 关闭按钮；可通过 Windows Acrylic 看到桌面与下层窗口，并叠加毛玻璃模糊。
+- **10 套预设配色 + 自定义取色器**：白色、黑色、蓝、绿、橙、粉、紫、青、黄、红；主色调与辅助色可自由取色。
+- **自定义启动画面**：可选择本地图片作为启动图，支持预览与恢复默认；未设置时显示旋转 C 图标 + 落地弹跳加载动画，动画可关闭。
+- **PCL 风格启动页**：新增独立「启动」页，展示当前版本、账号、Java 与内存，并提供大号启动按钮；「设置」移动到导航末尾。
+- **可浏览的下载页**：直接浏览 Mojang 官方版本清单（正式版 / 快照 / 旧版），支持搜索并安装选中版本。
+- **30 天本地登录凭证**：联网时优先校验与刷新正版登录；断网且缓存未超过 30 天时使用本地凭证，凭证关闭程序后仍保留。
+- 高 DPI 适配、底部固定启动栏、悬停放大/按压回弹与发光阴影均保留。
 
 ## 界面截图
 
@@ -200,11 +214,12 @@ python main.py --game-dir "<.minecraft 目录>"
 python main.py --exe "build/mc_core.exe"
 ```
 
-首次启动会在**用户文档目录**创建统一工作区（设置环境变量
+首次启动会在**程序同目录**创建 `CoreNextLauncher` 工作区（设置环境变量
 `CORENEXTLAUNCHER_HOME` 可覆盖位置）：
 
 ```text
-Documents/CoreNextLauncher/
+CoreNextLauncher.exe
+CoreNextLauncher/
 ├─ config/       launcher_config.json、账号与密钥
 ├─ kernel/       mc_core.exe 与托管的 Java 运行时
 ├─ instances/    各个游戏实例（default 为初始实例）
@@ -213,8 +228,13 @@ Documents/CoreNextLauncher/
 └─ exports/      导出的整合包
 ```
 
-配置与登录凭证不再放在 exe 或源码目录，`developer_state.json` 也在
-`config/` 下，并在每次启动与退出时强制重置为关闭。
+C++ 内核、配置、Minecraft 下载资源与实例全部位于工作区，不再默认写入 C 盘
+用户目录；`developer_state.json` 位于 `config/`，开发者/离线开关仍在每次
+启动与退出时强制重置为关闭。
+
+从 v1.7 升级时，账号、主题、Java 与内存设置会迁移，但旧的外部 `.minecraft`
+游戏目录会被自动切换到工作区的 `instances/default`；如需继续使用旧目录，可在
+「设置 → 游戏目录」中手动选择。
 
 ### 6. 打包 exe
 
@@ -224,7 +244,7 @@ Documents/CoreNextLauncher/
 python -m PyInstaller CoreNextLauncher.spec --noconfirm --clean --workpath pyinstaller-build
 ```
 
-输出：`dist/CoreNextLauncher.exe`。运行后会使用文档目录下的
+输出：`dist/CoreNextLauncher.exe`。运行后会在 exe 同目录创建
 `CoreNextLauncher/` 工作区保存配置、实例、内核与 Java 运行时。
 
 ### 7. 自测
@@ -241,7 +261,7 @@ python tests/selftest.py
 
 ### 首次启动
 
-1. 启动器会在**用户文档目录**创建 `CoreNextLauncher` 工作区，并自动创建
+1. 启动器会在**程序同目录**创建 `CoreNextLauncher` 工作区，并自动创建
    `default` 实例、部署 C++ 内核。
 2. 打开「设置 → 游戏与 Java」，确认实例目录（默认已在工作区的
    `instances/default`）。
@@ -359,6 +379,8 @@ python tests/selftest.py
 ## 已知限制
 
 - 仅面向 Windows；C++ 代码包含少量跨平台分支，但未在其他平台完整验证。
+- 系统级 Acrylic 背景模糊依赖 Windows 10/11 的 DWM 实现；远程桌面、节能模式或部分显卡驱动下可能退化为普通半透明面板。
+- 无边框窗口的缩放使用右下角尺寸手柄；拖动标题栏可移动窗口，双击可最大化/还原。
 - 内核为 32 位进程；可启动 64 位 Java，但不支持在 32 位系统上运行 64 位 Java。
 - 整合包导入面向 Modrinth `.mrpack`：自动安装 Fabric；Quilt / Forge / NeoForge
   需要用户自行安装加载器。
@@ -406,8 +428,12 @@ CoreNextLauncher/
 │  │  └─ jvm.py               内存推荐与 JVM 预设
 │  ├─ ui/instance_page.py     实例管理页
 │  ├─ ui/toolbox/             百宝箱各标签页
-│  ├─ resources/themes/       暗黑 / 明亮 QSS 主题
-│  ├─ paths.py                文档工作区与目录布局
+│  ├─ resources/themes/       暗黑 / 明亮 QSS 基础主题
+│  ├─ paths.py                程序目录工作区与目录布局
+│  ├─ theme.py                三套界面风格 / 配色 / 系统模糊
+│  ├─ anim.py                 全局动画速度
+│  ├─ ui/start_page.py        PCL 风格启动页
+│  ├─ ui/splash.py            启动加载动画 / 自定义启动图
 │  ├─ auth.py                 Microsoft 设备码登录
 │  ├─ account.py              DPAPI 加密的账号存储
 │  ├─ config.py               启动器配置

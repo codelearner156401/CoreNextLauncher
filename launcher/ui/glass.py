@@ -131,6 +131,7 @@ class BackgroundWidget(QWidget):
         self._glass = True
         self._blur_radius = DEFAULT_BLUR
         self._dim = DEFAULT_DIM
+        self._system_blur = False
 
         self._base = QPixmap()
         self._blurred = QPixmap()
@@ -162,12 +163,14 @@ class BackgroundWidget(QWidget):
         blur: int = DEFAULT_BLUR,
         dim: int = DEFAULT_DIM,
         theme_key: str | None = None,
+        system_blur: bool = False,
     ) -> None:
         path = str(image_path or "").strip()
         if path != self._image_path:
             self._load_image(path)
 
         self._glass = bool(glass)
+        self._system_blur = bool(system_blur)
         self._blur_radius = _clamp_int(blur, 0, MAX_BLUR, DEFAULT_BLUR)
         self._dim = _clamp_int(dim, 0, MAX_DIM, DEFAULT_DIM)
         if theme_key and theme_key != self._theme:
@@ -244,13 +247,24 @@ class BackgroundWidget(QWidget):
 
     def _compose_base(self, size: QSize) -> QImage:
         image = QImage(size, QImage.Format.Format_ARGB32_Premultiplied)
-        # Start from the theme background so transparent PNGs do not expose
-        # uninitialised pixels behind the artwork.
-        image.fill(QColor(theme.colors(self._theme)["bg"]))
+        # With system acrylic enabled and no custom artwork, the window itself
+        # must stay translucent so the desktop can show through.
+        transparent = bool(self._system_blur and self._image.isNull())
+        if transparent:
+            # A very light tint keeps text readable while the DWM acrylic
+            # layer still lets desktop light through.
+            tint = QColor(theme.colors(self._theme)["bg"])
+            tint.setAlpha(10)
+            image.fill(tint)
+        else:
+            image.fill(QColor(theme.colors(self._theme)["bg"]))
         painter = QPainter(image)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
 
+        if transparent:
+            painter.end()
+            return image
         if not self._image.isNull():
             self._paint_cover(painter, size)
         else:
@@ -286,8 +300,8 @@ class BackgroundWidget(QWidget):
             base.setColorAt(1.0, QColor("#070a12"))
             painter.fillRect(0, 0, width, height, QBrush(base))
             blobs = (
-                (0.12, 0.06, 0.58, "#3b6bff", 105),
-                (0.92, 0.16, 0.52, "#7b4dff", 95),
+                (0.12, 0.06, 0.58, theme.current_primary(), 105),
+                (0.92, 0.16, 0.52, theme.current_accent(), 95),
                 (0.68, 0.98, 0.55, "#0fb9a5", 62),
                 (0.02, 0.86, 0.42, "#e04f9b", 44),
             )
@@ -298,8 +312,8 @@ class BackgroundWidget(QWidget):
             base.setColorAt(1.0, QColor("#e7ecfa"))
             painter.fillRect(0, 0, width, height, QBrush(base))
             blobs = (
-                (0.10, 0.05, 0.60, "#7aa7ff", 110),
-                (0.95, 0.12, 0.52, "#b79bff", 95),
+                (0.10, 0.05, 0.60, theme.current_primary(), 110),
+                (0.95, 0.12, 0.52, theme.current_accent(), 95),
                 (0.70, 0.98, 0.55, "#8de7dc", 80),
                 (0.00, 0.88, 0.42, "#ffb7d5", 70),
             )
@@ -392,8 +406,15 @@ class BackgroundWidget(QWidget):
         self.update()
 
     # --------------------------------------------------------------- helpers
+    @property
+    def system_blur(self) -> bool:
+        return bool(self._system_blur)
+
     def panel_alpha(self) -> int:
-        return 180 if self._theme != "light" else 208
+        alpha = 180 if self._theme != "light" else 208
+        if self._system_blur:
+            alpha -= 72 if self._theme != "light" else 52
+        return max(80, alpha)
 
     def paint_backdrop(self, painter: QPainter, widget: QWidget) -> bool:
         """Draw the cached backdrop region currently under *widget*."""
@@ -483,7 +504,8 @@ class GlassFrame(QFrame):
         painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
         painter.setPen(Qt.PenStyle.NoPen)
 
-        glass = provider is not None and provider.glass_enabled
+        style = theme.current_style()
+        glass = style != "html" and provider is not None and provider.glass_enabled
         painted_backdrop = False
         if glass:
             painter.save()
@@ -491,15 +513,19 @@ class GlassFrame(QFrame):
             painted_backdrop = provider.paint_backdrop(painter, self)
             if painted_backdrop:
                 tint = QColor(colours["card"])
-                tint.setAlpha(self._tint_alpha or provider.panel_alpha())
+                alpha = self._tint_alpha or provider.panel_alpha()
+                if style == "frosted":
+                    alpha = min(255, alpha + (20 if provider.system_blur else 45))
+                tint.setAlpha(alpha)
                 painter.fillRect(self.rect(), tint)
 
-                sheen = QLinearGradient(rect.topLeft(), QPointF(rect.left(), rect.center().y()))
-                sheen.setColorAt(
-                    0.0, QColor(255, 255, 255, 34 if provider._theme != "light" else 92)
-                )
-                sheen.setColorAt(1.0, QColor(255, 255, 255, 0))
-                painter.fillPath(path, QBrush(sheen))
+                if style == "liquid":
+                    sheen = QLinearGradient(rect.topLeft(), QPointF(rect.left(), rect.center().y()))
+                    sheen.setColorAt(
+                        0.0, QColor(255, 255, 255, 34 if provider._theme != "light" else 92)
+                    )
+                    sheen.setColorAt(1.0, QColor(255, 255, 255, 0))
+                    painter.fillPath(path, QBrush(sheen))
             painter.restore()
 
         if not painted_backdrop:
@@ -512,7 +538,7 @@ class GlassFrame(QFrame):
         painter.setPen(QPen(border, 1.0))
         painter.drawPath(path)
 
-        if glass and painted_backdrop:
+        if glass and painted_backdrop and style == "liquid":
             highlight = QLinearGradient(rect.topLeft(), rect.bottomLeft())
             highlight.setColorAt(
                 0.0, QColor(255, 255, 255, 72 if provider._theme != "light" else 190)

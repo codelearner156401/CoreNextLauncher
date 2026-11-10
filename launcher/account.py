@@ -25,9 +25,17 @@ class Account:
     refresh_token: str = ""
     client_id: str = ""
     user_type: str = "msa"
+    cached_at: float = 0.0
 
     def expired(self, margin: float = 600.0) -> bool:
         return time.time() >= float(self.expires_at) - margin
+
+    def within_cache(self, days: int = 30) -> bool:
+        """Whether this login may be reused offline within the cache window."""
+        cached = float(self.cached_at or 0.0)
+        if cached <= 0:
+            return False
+        return (time.time() - cached) <= max(1, days) * 86400
 
     def launch_account(self) -> dict:
         return {
@@ -51,7 +59,11 @@ def load_account(path: Path = ACCOUNT_PATH) -> Account | None:
             raw = json.loads(plain)
         known = {field.name for field in fields(Account)}
         values = {key: value for key, value in raw.items() if key in known}
-        return Account(**values)
+        account = Account(**values)
+        if account.cached_at <= 0 and account.expires_at:
+            # Older files predate cached_at; approximate the original login time.
+            account.cached_at = max(0.0, float(account.expires_at) - 86400.0)
+        return account
     except (OSError, ValueError, KeyError, json.JSONDecodeError):
         return None
 

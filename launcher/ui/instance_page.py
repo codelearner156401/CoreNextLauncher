@@ -142,7 +142,7 @@ class InstancePage(QWidget):
         layout.addWidget(list_card, 1)
 
         info_card, info_layout = _card(
-            "工作区", "启动器会把配置、内核、实例、缓存和导出统一放在文档目录下。"
+            "工作区", "启动器会把配置、内核、实例、缓存和导出统一放在程序目录下。"
         )
         self.root_label = QLabel(str(instances.root_dir()))
         self.root_label.setObjectName("Muted")

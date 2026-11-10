@@ -29,6 +29,7 @@ from launcher.core_client import CoreClient
 from launcher.main_window import MainWindow
 from launcher.paths import ensure_workspace
 from launcher.theme import apply_theme, make_app_icon
+from launcher.ui.splash import create_splash
 from launcher.ui.account_dialog import shutdown_workers
 from launcher.ui.tasks import shutdown_tasks
 
@@ -61,7 +62,6 @@ def main(argv: list[str] | None = None) -> int:
     app.setApplicationName(APP_NAME)
     app.setOrganizationName("CoreNextLauncher")
     app.setStyle("Fusion")
-    app.setWindowIcon(make_app_icon())
     app.aboutToQuit.connect(shutdown_workers)
     app.aboutToQuit.connect(shutdown_tasks)
 
@@ -70,12 +70,28 @@ def main(argv: list[str] | None = None) -> int:
     if args.game_dir:
         config.game_dir = str(Path(args.game_dir))
     if args.theme:
-        config.theme = args.theme
-    apply_theme(app, config.theme)
+        config.ui_style = "html" if args.theme == "light" else "liquid"
+    style = config.ui_style
+    profile = config.theme_profiles.get(style, {})
+    apply_theme(
+        app,
+        style,
+        str(profile.get("base") or ("light" if style in ("frosted", "html") else "dark")),
+        str(profile.get("primary") or "#4f8cff"),
+        str(profile.get("accent") or "#7b5cff"),
+    )
+    app.setWindowIcon(make_app_icon())
+
+    splash = create_splash(config)
+    if splash is not None:
+        splash.show()
+        app.processEvents()
 
     client = CoreClient(args.exe) if args.exe else CoreClient()
     window = MainWindow(client, config)
     window.show()
+    if splash is not None:
+        splash.finish(window)
     return app.exec()
 
 

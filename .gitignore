@@ -11,6 +11,7 @@
 /dist/
 /pyinstaller-build/
 /out/
+/CoreNextLauncher/
 CMakeFiles/
 CMakeCache.txt
 cmake_install.cmake

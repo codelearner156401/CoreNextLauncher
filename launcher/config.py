@@ -4,15 +4,64 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 
+from . import anim
 from .constants import DEFAULT_AI_MODEL, DEFAULT_MS_CLIENT_ID, DEFAULT_UPDATE_REPO
 from .paths import app_root, data_dir, default_instance_dir
 from .services.jvm import PRESET_LABELS, sanitize_args
 
 PROJECT_ROOT = app_root()
 CONFIG_PATH = data_dir() / "launcher_config.json"
+
+UI_STYLES = ("liquid", "frosted", "html")
+
+_STYLE_DEFAULTS: dict[str, dict] = {
+    "liquid": {
+        "color": "blue",
+        "primary": "#4f8cff",
+        "accent": "#7b5cff",
+        "base": "dark",
+        "glass": True,
+        "system_blur": True,
+        "blur": 26,
+        "dim": 42,
+        "background": "",
+        "splash": "",
+    },
+    "frosted": {
+        "color": "blue",
+        "primary": "#2563eb",
+        "accent": "#7c3aed",
+        "base": "light",
+        "glass": True,
+        "system_blur": True,
+        "blur": 34,
+        "dim": 30,
+        "background": "",
+        "splash": "",
+    },
+    "html": {
+        "color": "blue",
+        "primary": "#2563eb",
+        "accent": "#7c3aed",
+        "base": "light",
+        "glass": False,
+        "system_blur": True,
+        "blur": 0,
+        "dim": 0,
+        "background": "",
+        "splash": "",
+    },
+}
+
+_HEX_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
+
+
+def _default_profile(style: str) -> dict:
+    return dict(_STYLE_DEFAULTS.get(style, _STYLE_DEFAULTS["liquid"]))
 
 
 @dataclass
@@ -29,6 +78,11 @@ class AppConfig:
     glass_enabled: bool = True
     glass_blur: int = 26
     background_dim: int = 42
+    # --- v1.8 appearance / animation -----------------------------------
+    ui_style: str = "liquid"
+    theme_profiles: dict = field(default_factory=dict)
+    animation_speed: float = 1.0
+    loading_animation: bool = True
     # --- automation / 百宝箱 -------------------------------------------
     auto_backup: bool = True
     backup_keep: int = 5
@@ -75,6 +129,46 @@ class AppConfig:
         if self.jvm_preset not in PRESET_LABELS:
             self.jvm_preset = "auto"
         self.jvm_args = sanitize_args(self.jvm_args)
+
+        # --- v1.8 three UI styles with independent profiles ----------------
+        self.animation_speed = anim.clamp(getattr(self, "animation_speed", 1.0))
+        self.loading_animation = bool(getattr(self, "loading_animation", True))
+        if self.ui_style not in UI_STYLES:
+            self.ui_style = "liquid"
+        raw_profiles = self.theme_profiles if isinstance(self.theme_profiles, dict) else {}
+        had_profiles = bool(raw_profiles)
+        profiles: dict[str, dict] = {}
+        for style in UI_STYLES:
+            merged = _default_profile(style)
+            source = raw_profiles.get(style)
+            if isinstance(source, dict):
+                for key in merged:
+                    if key in source:
+                        merged[key] = source[key]
+            if not had_profiles and style == "liquid":
+                merged["background"] = self.background_image
+                merged["glass"] = self.glass_enabled
+                merged["blur"] = self.glass_blur
+                merged["dim"] = self.background_dim
+            merged["base"] = _STYLE_DEFAULTS[style]["base"]
+            merged["glass"] = bool(merged.get("glass", True))
+            merged["system_blur"] = bool(merged.get("system_blur", True))
+            try:
+                merged["blur"] = max(0, min(48, int(merged.get("blur", 26))))
+            except (TypeError, ValueError):
+                merged["blur"] = 26
+            try:
+                merged["dim"] = max(0, min(80, int(merged.get("dim", 42))))
+            except (TypeError, ValueError):
+                merged["dim"] = 42
+            for key in ("primary", "accent"):
+                value = str(merged.get(key) or "")
+                if not _HEX_RE.match(value):
+                    merged[key] = _STYLE_DEFAULTS[style][key]
+            for key in ("background", "splash", "color"):
+                merged[key] = str(merged.get(key) or "")
+            profiles[style] = merged
+        self.theme_profiles = profiles
         return self
 
     def to_dict(self) -> dict:

@@ -1,4 +1,4 @@
-"""Minecraft instances stored under ``Documents/CoreNextLauncher/instances``.
+"""Minecraft instances stored under ``CoreNextLauncher/instances`` next to the program.
 
 An instance is a self-contained game directory (``versions/``, ``mods/``,
 ``saves/`` ...).  Cloning copies everything except logs, crash reports, old

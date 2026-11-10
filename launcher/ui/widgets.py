@@ -10,6 +10,7 @@ from PySide6.QtCore import (
     Property,
     QEasingCurve,
     QEvent,
+    QPoint,
     QPropertyAnimation,
     QRect,
     QRectF,
@@ -31,7 +32,6 @@ from PySide6.QtGui import (
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QGraphicsDropShadowEffect,
-    QGraphicsOpacityEffect,
     QLabel,
     QListWidget,
     QListWidgetItem,
@@ -49,7 +49,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .. import theme
+from .. import anim, theme
 from .glass import GlassFrame
 
 TYPE_LABELS = {
@@ -163,7 +163,7 @@ class HoverCard(GlassFrame):
         super().__init__(parent, radius=14.0)
         self._hover = 0.0
         self._anim = QPropertyAnimation(self, b"hoverProgress", self)
-        self._anim.setDuration(180)
+        self._anim.setDuration(anim.ms(180))
         self._anim.setEasingCurve(QEasingCurve.Type.OutCubic)
         self.setAttribute(Qt.WidgetAttribute.WA_Hover, True)
 
@@ -225,11 +225,11 @@ class AnimatedLaunchButton(QPushButton):
         self._scale_anim.setEasingCurve(QEasingCurve.Type.OutBack)
 
         self._blur_anim = QPropertyAnimation(self._shadow, b"blurRadius", self)
-        self._blur_anim.setDuration(260)
+        self._blur_anim.setDuration(anim.ms(260))
         self._blur_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
 
         self._color_anim = QPropertyAnimation(self._shadow, b"color", self)
-        self._color_anim.setDuration(260)
+        self._color_anim.setDuration(anim.ms(260))
         self._color_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
 
         self.pressed.connect(self._on_pressed)
@@ -255,7 +255,7 @@ class AnimatedLaunchButton(QPushButton):
         self._scale_anim.stop()
         self._scale_anim.setStartValue(self._scale)
         self._scale_anim.setEndValue(target)
-        self._scale_anim.setDuration(duration)
+        self._scale_anim.setDuration(anim.ms(duration))
         self._scale_anim.setEasingCurve(curve)
         self._scale_anim.start()
 
@@ -263,14 +263,14 @@ class AnimatedLaunchButton(QPushButton):
         self._blur_anim.stop()
         self._blur_anim.setStartValue(self._shadow.blurRadius())
         self._blur_anim.setEndValue(blur)
-        self._blur_anim.setDuration(duration)
+        self._blur_anim.setDuration(anim.ms(duration))
         self._blur_anim.start()
 
         colour = QColor(79, 140, 255, alpha)
         self._color_anim.stop()
         self._color_anim.setStartValue(self._shadow.color())
         self._color_anim.setEndValue(colour)
-        self._color_anim.setDuration(duration)
+        self._color_anim.setDuration(anim.ms(duration))
         self._color_anim.start()
 
     def _update_glow(self, immediate: bool = False) -> None:
@@ -366,9 +366,9 @@ class AnimatedTabBar(QTabBar):
         self._indicator_width = 0.0
         self._x_anim = QPropertyAnimation(self, b"indicatorX", self)
         self._w_anim = QPropertyAnimation(self, b"indicatorWidth", self)
-        for anim in (self._x_anim, self._w_anim):
-            anim.setDuration(220)
-            anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        for animation in (self._x_anim, self._w_anim):
+            animation.setDuration(anim.ms(220))
+            animation.setEasingCurve(QEasingCurve.Type.OutCubic)
         self.currentChanged.connect(self._animate_indicator)
 
     def get_indicator_x(self) -> float:
@@ -449,78 +449,57 @@ class AnimatedTabBar(QTabBar):
         )
 
 
-class FadingStackedWidget(QStackedWidget):
-    """QStackedWidget with a single-page fade-in transition.
+class SlidingStackedWidget(QStackedWidget):
+    """QStackedWidget with a PCL-style horizontal slide for the new page."""
 
-    The old page is hidden immediately by setCurrentIndex(); only the new page
-    is animated from opacity 0 to 1.  There is deliberately no second visible
-    page or snapshot overlay, so page contents can never overlap.
-    """
-
-    FADE_MS = 200
+    SLIDE_MS = 280
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.setObjectName("MainStack")
         self.setContentsMargins(0, 0, 0, 0)
         self._page: QWidget | None = None
-        self._effect: QGraphicsOpacityEffect | None = None
         self._anim: QPropertyAnimation | None = None
 
     def _cleanup(self) -> None:
-        anim = self._anim
+        anim_obj = self._anim
         self._anim = None
-        if anim is not None:
-            anim.stop()
-            anim.deleteLater()
-        page = self._page
-        effect = self._effect
+        if anim_obj is not None:
+            anim_obj.stop()
+            anim_obj.deleteLater()
+        if self._page is not None:
+            self._page.move(0, 0)
         self._page = None
-        self._effect = None
-        if page is not None and effect is not None and page.graphicsEffect() is effect:
-            page.setGraphicsEffect(None)
 
-    def _finish(self, page: QWidget, effect: QGraphicsOpacityEffect,
-                anim: QPropertyAnimation) -> None:
-        if page.graphicsEffect() is effect:
-            page.setGraphicsEffect(None)
-        if self._anim is anim:
-            self._anim = None
-            self._page = None
-            self._effect = None
-        anim.deleteLater()
-
-    def fade_to(self, index: int) -> None:
+    def slide_to(self, index: int) -> None:
         if index < 0 or index >= self.count() or index == self.currentIndex():
             return
         page = self.widget(index)
         if page is None:
             return
-
+        old_index = self.currentIndex()
         self._cleanup()
-
-        # Install the effect before switching: the first visible frame of the
-        # new page is already at opacity 0, so it cannot flash at full opacity.
-        effect = QGraphicsOpacityEffect(page)
-        effect.setOpacity(0.0)
-        page.setGraphicsEffect(effect)
-        self.setCurrentIndex(index)  # old page is hidden synchronously here
-
-        if not self.isVisible():
-            if page.graphicsEffect() is effect:
-                page.setGraphicsEffect(None)
+        self.setCurrentIndex(index)
+        if not self.isVisible() or self.width() < 10:
             return
-
-        anim = QPropertyAnimation(effect, b"opacity", self)
-        anim.setDuration(self.FADE_MS)
-        anim.setStartValue(0.0)
-        anim.setEndValue(1.0)
-        anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        offset = self.width() if index > old_index else -self.width()
+        page.move(offset, 0)
+        animation = QPropertyAnimation(page, b"pos", self)
+        animation.setDuration(anim.ms(self.SLIDE_MS))
+        animation.setStartValue(QPoint(offset, 0))
+        animation.setEndValue(QPoint(0, 0))
+        animation.setEasingCurve(QEasingCurve.Type.OutCubic)
         self._page = page
-        self._effect = effect
-        self._anim = anim
-        anim.finished.connect(lambda: self._finish(page, effect, anim))
-        anim.start()
+        self._anim = animation
+        animation.finished.connect(self._cleanup)
+        animation.start()
+
+    # Backwards-compatible alias for callers/tests written for the fade API.
+    def fade_to(self, index: int) -> None:
+        self.slide_to(index)
+
+
+FadingStackedWidget = SlidingStackedWidget
 
 
 class AnimatedTabView(QWidget):
@@ -688,7 +667,7 @@ class LogView(QPlainTextEdit):
         self.auto_scroll = True
         self._records: list[tuple[str, str, str]] = []
         self._scroll_anim = QPropertyAnimation(self.verticalScrollBar(), b"value", self)
-        self._scroll_anim.setDuration(220)
+        self._scroll_anim.setDuration(anim.ms(220))
         self._scroll_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
 
     def add(self, level: str, message: str) -> None:

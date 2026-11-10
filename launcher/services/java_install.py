@@ -1,7 +1,7 @@
 """Download and unpack a Temurin JDK from the Adoptium API.
 
 Used when no suitable Java is installed: the archive is fetched with a size
-and SHA-256 check, extracted under ``Documents/CoreNextLauncher/kernel/runtime``
+and SHA-256 check, extracted under ``CoreNextLauncher/kernel/runtime`` next to the program
 and the resulting ``java.exe`` is returned so the launcher can select it
 immediately.
 """

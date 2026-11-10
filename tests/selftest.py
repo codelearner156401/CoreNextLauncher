@@ -170,6 +170,14 @@ def test_config(root: Path) -> None:
         loaded.jvm_preset == "auto" and loaded.jvm_args == [],
         f"{loaded.jvm_preset} {loaded.jvm_args}",
     )
+    check(
+        "animation speed clamped in config",
+        AppConfig(animation_speed=9.0).normalized().animation_speed == 2.5,
+    )
+    check(
+        "three theme profiles",
+        set(AppConfig().normalized().theme_profiles) == {"liquid", "frosted", "html"},
+    )
     jvm_config = AppConfig(
         jvm_preset="g1",
         jvm_args=["-XX:+UseG1GC", " -XX:+UseG1GC ", "", "-Xss4M"],
@@ -262,6 +270,28 @@ def test_jvm() -> None:
     )
     check("sanitize drops newlines", jvm.sanitize_args(["-Xmx4G\n", "-Xss4M"]) == ["-Xss4M"])
     check("sanitize caps duplicates", jvm.sanitize_args(["-Xss4M", "-Xss4M"]) == ["-Xss4M"])
+
+
+def test_account_cache() -> None:
+    print("account cache")
+    from launcher.account import Account
+
+    fresh = Account(
+        name="Steve",
+        uuid="0",
+        access_token="token",
+        expires_at=time.time() - 10,
+        cached_at=time.time(),
+    )
+    stale = Account(
+        name="Steve",
+        uuid="0",
+        access_token="token",
+        expires_at=time.time() - 10,
+        cached_at=time.time() - 31 * 86400,
+    )
+    check("credentials cached within 30 days", fresh.within_cache(30))
+    check("stale credentials rejected", not stale.within_cache(30))
 
 
 def test_dev_state(root: Path) -> None:
@@ -514,9 +544,9 @@ def test_servers() -> None:
 
 def test_updater() -> None:
     print("updater")
-    check("version parse", updater.parse_version("v1.7.0") == (1, 7, 0))
+    check("version parse", updater.parse_version("v1.8.1") == (1, 8, 1))
     check("newer detected", updater.is_newer("v1.10.0", "1.9.9"))
-    check("same not newer", not updater.is_newer("v1.7.0", APP_VERSION))
+    check("same not newer", not updater.is_newer("v1.8.1", APP_VERSION))
     check("older not newer", not updater.is_newer("v1.0.0", APP_VERSION))
     asset = updater._pick_asset(
         [
@@ -598,7 +628,41 @@ def test_ui(root: Path) -> None:
     for _ in range(25):
         app.processEvents()
         time.sleep(0.03)
-    check("main tabs", window.tabs.count() == 5)
+    check("main tabs", window.tabs.count() == 6)
+    check(
+        "settings tab is last",
+        window.tabs.tab_bar.tabText(window.tabs.count() - 1) == "设置",
+        window.tabs.tab_bar.tabText(window.tabs.count() - 1),
+    )
+    check(
+        "start page present",
+        window.start_page is not None
+        and window.tabs.tab_bar.tabText(0) == "启动",
+    )
+    check(
+        "frameless window buttons",
+        hasattr(window, "min_button")
+        and hasattr(window, "max_button")
+        and hasattr(window, "close_button"),
+    )
+    window.settings_page.style_combo.setCurrentIndex(
+        window.settings_page.style_combo.findData("frosted")
+    )
+    for _ in range(5):
+        app.processEvents()
+        time.sleep(0.02)
+    from launcher import theme as theme_module
+
+    check("theme style switches live", theme_module.current_style() == "frosted")
+    check("frosted uses light base", theme_module.current_theme() == "light")
+    window.settings_page.style_combo.setCurrentIndex(
+        window.settings_page.style_combo.findData("liquid")
+    )
+    window.settings_page.animation_speed_slider.setValue(250)
+    from launcher import anim as anim_module
+
+    check("animation speed clamped", anim_module.speed() == 2.5)
+    window.settings_page.animation_speed_slider.setValue(100)
     check(
         "developer/offline reset on startup",
         not window.dev_state.developer_unlocked
@@ -695,6 +759,7 @@ def main() -> int:
         test_workspace()
         test_instances(game)
         test_jvm()
+        test_account_cache()
         test_dev_state(root)
         test_crash(game)
         test_mods(game)
