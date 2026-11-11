@@ -5,7 +5,8 @@
 
 - `docs/screenshots/main-dark.png` — 主界面（暗黑 + 液态玻璃）
 - `docs/screenshots/main-light.png` — 主界面（明亮）
-- `docs/screenshots/start.png` — PCL 风格启动页
+- `docs/screenshots/start.png` — PCL 风格启动页（含皮肤管理）
+- `docs/screenshots/isolation.png` — 版本隔离
 - `docs/screenshots/theme.png` — 主题 / 配色 / 启动图设置
 - `docs/screenshots/instances.png` — 实例管理
 - `docs/screenshots/settings-jvm.png` — JVM 参数编辑器

@@ -503,7 +503,7 @@ FadingStackedWidget = SlidingStackedWidget
 
 
 class AnimatedTabView(QWidget):
-    """Tab bar + StackedWidget with animated page transitions."""
+    """Tab bar + a navigation stack of base tabs and subpages."""
 
     currentChanged = Signal(int)
 
@@ -519,17 +519,66 @@ class AnimatedTabView(QWidget):
         layout.addWidget(self.tab_bar)
         layout.addWidget(self.stack, 1)
         self.tab_bar.currentChanged.connect(self._on_tab_changed)
+        self._base_count = 0
+        self._subpages: list[QWidget] = []
+        self._origins: dict[QWidget, int] = {}
+        self._retired_pages: list[QWidget] = []
+
+    def _clear_subpages(self) -> None:
+        for page in self._subpages:
+            self.stack.removeWidget(page)
+            page.hide()
+            self._retired_pages.append(page)
+        self._subpages.clear()
+        self._origins.clear()
 
     def _on_tab_changed(self, index: int) -> None:
-        self.stack.fade_to(index)
+        had_subpages = bool(self._subpages)
+        if had_subpages:
+            self._clear_subpages()
+        if not had_subpages or index != self.stack.currentIndex():
+            self.stack.slide_to(index)
         self.currentChanged.emit(index)
 
     def addTab(self, widget: QWidget, label: str) -> int:
         index = self.stack.addWidget(widget)
         self.tab_bar.addTab(label)
+        self._base_count += 1
         if index == 0:
             self.stack.setCurrentIndex(0)
         return index
+
+    def push_page(self, page: QWidget) -> None:
+        if self.stack.indexOf(page) >= 0:
+            self.stack.slide_to(self.stack.indexOf(page))
+            return
+        index = self.stack.addWidget(page)
+        self._subpages.append(page)
+        self._origins[page] = self.stack.currentIndex()
+        self.stack.slide_to(index)
+        self.currentChanged.emit(self.tab_bar.currentIndex())
+
+    def pop_page(self) -> None:
+        if not self._subpages:
+            return
+        page = self.stack.currentWidget()
+        target = self._origins.pop(page, max(0, self.stack.currentIndex() - 1)) if page is not None else 0
+        if page is not None:
+            self._subpages.remove(page)
+        self.stack.slide_to(target)
+        if page is not None:
+            QTimer.singleShot(anim.ms(320), lambda: self._drop_page(page))
+
+    def _drop_page(self, page: QWidget) -> None:
+        if self.stack.indexOf(page) >= 0:
+            self.stack.removeWidget(page)
+        page.hide()
+        # Keep the page alive: a background version-catalog / skin task may
+        # still be running and QThread must not be destroyed mid-flight.
+        self._retired_pages.append(page)
+
+    def can_go_back(self) -> bool:
+        return bool(self._subpages)
 
     def setCurrentIndex(self, index: int) -> None:
         if 0 <= index < self.tab_bar.count():
@@ -537,7 +586,7 @@ class AnimatedTabView(QWidget):
 
     def setCurrentWidget(self, widget: QWidget) -> None:
         index = self.stack.indexOf(widget)
-        if index >= 0:
+        if 0 <= index < self._base_count:
             self.setCurrentIndex(index)
 
     def currentIndex(self) -> int:
@@ -547,7 +596,7 @@ class AnimatedTabView(QWidget):
         return self.stack.currentWidget()
 
     def count(self) -> int:
-        return self.stack.count()
+        return self._base_count
 
     def widget(self, index: int) -> QWidget | None:
         return self.stack.widget(index)

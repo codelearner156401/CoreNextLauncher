@@ -38,7 +38,9 @@ inline std::vector<std::string> build_launch_command(const json& vjson, const fs
                                                      const std::string& min_mem, bool optimize,
                                                      bool offline,
                                                      const std::vector<std::string>& extra_game_args = {},
-                                                     const std::vector<std::string>& extra_jvm_args = {}) {
+                                                     const std::vector<std::string>& extra_jvm_args = {},
+                                                     const fs::path& game_dir = {}) {
+    const fs::path game_root = game_dir.empty() ? mc_dir : game_dir;
     const std::string osn = os_name();
     const std::string path_sep = ";";
     std::vector<std::string> cp;
@@ -58,7 +60,7 @@ inline std::vector<std::string> build_launch_command(const json& vjson, const fs
     std::map<std::string, std::string> ph = {
         {"${auth_player_name}", account.value("name", "Steve")},
         {"${version_name}", vid},
-        {"${game_directory}", fs::absolute(mc_dir).u8string()},
+        {"${game_directory}", fs::absolute(game_root).u8string()},
         {"${assets_root}", fs::absolute(mc_dir / "assets").u8string()},
         {"${assets_index_name}", vjson.value("assetIndex", json::object()).value("id", "legacy")},
         {"${auth_uuid}", account.value("uuid", "00000000-0000-0000-0000-000000000000")},
@@ -72,7 +74,7 @@ inline std::vector<std::string> build_launch_command(const json& vjson, const fs
         {"${version_type}", vjson.value("type", "release")},
         {"${natives_directory}", fs::absolute(mc_dir / "versions" / vid / "natives").u8string()},
         {"${launcher_name}", "CoreNextLauncher"},
-        {"${launcher_version}", "1.8.1"},
+        {"${launcher_version}", "1.9.2"},
         {"${classpath}", classpath}};
     auto replace = [&](std::string s) {
         for (auto& [key, value] : ph) {

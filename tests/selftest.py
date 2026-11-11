@@ -201,6 +201,7 @@ def test_workspace() -> None:
         ("cache", workspace.cache),
         ("logs", workspace.logs),
         ("exports", workspace.exports),
+        ("skins", workspace.skins),
     ):
         check(f"workspace {name} dir", folder.is_dir(), str(folder))
     check(
@@ -270,6 +271,47 @@ def test_jvm() -> None:
     )
     check("sanitize drops newlines", jvm.sanitize_args(["-Xmx4G\n", "-Xss4M"]) == ["-Xss4M"])
     check("sanitize caps duplicates", jvm.sanitize_args(["-Xss4M", "-Xss4M"]) == ["-Xss4M"])
+
+
+def test_isolation(root: Path) -> None:
+    print("isolation")
+    from launcher.services import isolation
+
+    instance = root / "isolation-instance"
+    version_dir = instance / "versions" / "1.20.1"
+    version_dir.mkdir(parents=True)
+    (version_dir / "1.20.1.json").write_text("{}", encoding="utf-8")
+    (instance / "mods").mkdir()
+    (instance / "mods" / "shared.jar").write_text("jar", encoding="utf-8")
+    isolation.set_isolation(instance, "1.20.1", True, migrate=True)
+    check("isolation enabled", isolation.is_enabled(instance, "1.20.1"))
+    check("isolation copies mods", (version_dir / "mods" / "shared.jar").is_file())
+    check(
+        "isolation changes game dir",
+        isolation.game_dir(instance, "1.20.1") == version_dir,
+    )
+    (version_dir / "mods" / "isolated.jar").write_text("jar", encoding="utf-8")
+    isolation.set_isolation(instance, "1.20.1", False, migrate=True)
+    check("isolation disabled", not isolation.is_enabled(instance, "1.20.1"))
+    check("isolation merges back", (instance / "mods" / "isolated.jar").is_file())
+
+
+def test_skins(root: Path) -> None:
+    print("skins")
+    from PySide6.QtGui import QColor, QImage
+
+    from launcher.services import skins
+
+    image = QImage(64, 64, QImage.Format.Format_ARGB32)
+    image.fill(QColor("#e0ac69"))
+    source = root / "skin-test.png"
+    image.save(str(source))
+    check("skin model steve", skins.detect_model(image) == "steve")
+    entry = skins.import_skin(source, "自测皮肤")
+    check("skin imported", entry.path.is_file() and entry.model == "steve")
+    check("skin listed", any(item.path == entry.path for item in skins.list_skins()))
+    skins.delete_skin(entry)
+    check("skin deleted", not entry.path.exists())
 
 
 def test_account_cache() -> None:
@@ -544,9 +586,9 @@ def test_servers() -> None:
 
 def test_updater() -> None:
     print("updater")
-    check("version parse", updater.parse_version("v1.8.1") == (1, 8, 1))
+    check("version parse", updater.parse_version("v1.9.2") == (1, 9, 2))
     check("newer detected", updater.is_newer("v1.10.0", "1.9.9"))
-    check("same not newer", not updater.is_newer("v1.8.1", APP_VERSION))
+    check("same not newer", not updater.is_newer("v1.9.2", APP_VERSION))
     check("older not newer", not updater.is_newer("v1.0.0", APP_VERSION))
     asset = updater._pick_asset(
         [
@@ -639,6 +681,35 @@ def test_ui(root: Path) -> None:
         window.start_page is not None
         and window.tabs.tab_bar.tabText(0) == "启动",
     )
+    window.open_version_browser()
+    for _ in range(4):
+        app.processEvents()
+        time.sleep(0.02)
+    check(
+        "version browser is a subpage",
+        window.tabs.stack.count() == window.tabs.count() + 1,
+        str(window.tabs.stack.count()),
+    )
+    window.tabs.stack.currentWidget().back_button.click()
+    for _ in range(15):
+        app.processEvents()
+        time.sleep(0.03)
+    check(
+        "subpage back returns to base tab",
+        window.tabs.stack.count() == window.tabs.count(),
+        str(window.tabs.stack.count()),
+    )
+    check("subpage back restores start page", type(window.tabs.stack.currentWidget()).__name__ == "StartPage")
+    window.open_skin_page()
+    for _ in range(4):
+        app.processEvents()
+        time.sleep(0.02)
+    check("skin page is a subpage", type(window.tabs.stack.currentWidget()).__name__ == "SkinPage")
+    window.tabs.stack.currentWidget().back_button.click()
+    for _ in range(15):
+        app.processEvents()
+        time.sleep(0.03)
+
     check(
         "frameless window buttons",
         hasattr(window, "min_button")
@@ -760,6 +831,8 @@ def main() -> int:
         test_instances(game)
         test_jvm()
         test_account_cache()
+        test_isolation(root)
+        test_skins(root)
         test_dev_state(root)
         test_crash(game)
         test_mods(game)

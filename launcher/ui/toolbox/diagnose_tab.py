@@ -186,7 +186,7 @@ class DiagnoseTab(QWidget):
             + (f"（可疑 Mod：{'、'.join(analysis.suspect_mods)}）" if analysis.suspect_mods else ""),
         )
         dialog = CrashDialog(self, analysis, self.game_dir)
-        dialog.exec()
+        run_in_window(self, dialog, "崩溃诊断")
 
     def choose_report(self) -> None:
         if self.game_dir is None:
@@ -221,7 +221,7 @@ class DiagnoseTab(QWidget):
             return
         crash_text = self._analysis.raw if self._analysis is not None else ""
         dialog = AIDialog(self, self.game_dir, crash_text)
-        dialog.exec()
+        run_in_window(self, dialog, "AI 诊断")
 
     @staticmethod
     def _repolish(widget: QWidget) -> None:

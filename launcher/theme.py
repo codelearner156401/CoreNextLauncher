@@ -25,7 +25,7 @@ STYLE_ORDER = ("liquid", "frosted", "html")
 STYLE_LABELS = {
     "liquid": "液态玻璃",
     "frosted": "毛玻璃",
-    "html": "HTML 风格",
+    "html": "HTML 界面",
 }
 STYLE_BASE = {"liquid": "dark", "frosted": "light", "html": "light"}
 THEME_DIR = Path(__file__).resolve().parent / "resources" / "themes"

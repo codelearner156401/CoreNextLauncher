@@ -5,10 +5,10 @@ from __future__ import annotations
 from pathlib import Path
 
 from PySide6.QtCore import QPointF, QRectF, Qt, QTimer
-from PySide6.QtGui import QColor, QFont, QLinearGradient, QPainter, QPainterPath, QPixmap
+from PySide6.QtGui import QColor, QFont, QLinearGradient, QPainter, QPainterPath, QPen, QPixmap
 from PySide6.QtWidgets import QApplication, QWidget
 
-from .. import APP_NAME, theme
+from .. import APP_NAME, anim, theme
 
 
 class LoadingSplash(QWidget):
@@ -44,8 +44,9 @@ class LoadingSplash(QWidget):
             self._timer.start()
 
     def _tick(self) -> None:
-        self._angle = (self._angle + 3.2) % 360.0
-        self._phase += 0.11
+        speed = anim.speed()
+        self._angle = (self._angle + 3.2 * speed) % 360.0
+        self._phase += 0.11 * speed
         self.update()
 
     def paintEvent(self, event) -> None:  # noqa: N802
@@ -78,28 +79,25 @@ class LoadingSplash(QWidget):
                 background.setColorAt(1.0, QColor("#111827"))
             painter.fillRect(self.rect(), background)
 
-            # Rotating C tile with a soft landing-bounce loop.
+            # Small, single, very thin blue line C (no fill, no thick glow).
             import math
 
-            size = 92.0
-            bounce = -abs(math.sin(self._phase)) * 10.0
-            center = QPointF(self.width() / 2.0, 104 + bounce)
+            size = 46.0
+            bounce = -abs(math.sin(self._phase)) * 9.0
+            center = QPointF(self.width() / 2.0, 102 + bounce)
             painter.save()
             painter.translate(center)
             painter.rotate(self._angle)
-            tile = QRectF(-size / 2, -size / 2, size, size)
-            gradient = QLinearGradient(tile.topLeft(), tile.bottomRight())
-            gradient.setColorAt(0.0, QColor(self._primary))
-            gradient.setColorAt(1.0, QColor(self._accent))
-            painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(gradient)
-            painter.drawRoundedRect(tile, 24, 24)
-            painter.setPen(QColor("#ffffff"))
-            font = QFont("Segoe UI")
-            font.setPixelSize(52)
-            font.setWeight(QFont.Weight.Black)
-            painter.setFont(font)
-            painter.drawText(tile, Qt.AlignmentFlag.AlignCenter, "C")
+            pen = QPen(QColor("#4f8cff"))
+            pen.setWidthF(2.2)
+            pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+            painter.setPen(pen)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawArc(
+                QRectF(-size / 2, -size / 2, size, size),
+                int(42 * 16),
+                int(276 * 16),
+            )
             painter.restore()
 
             painter.setPen(QColor(colours["text"]))

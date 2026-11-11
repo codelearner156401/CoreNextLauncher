@@ -28,14 +28,16 @@ from ...services import modrinth, mods as mods_service
 from ...services.modrinth import ModUpdate
 from ...services.util import human_size
 from ..widgets import natural_key
+from ..loading_overlay import LoadingOverlay
 from .common import card, open_path, start_task
 
-COLUMNS = ("启用", "名称", "版本", "Mod ID", "加载器", "大小", "文件")
+COLUMNS = ("启用", "名称", "版本", "作者", "Mod ID", "加载器", "大小", "文件")
 
 
 class ModsTab(QWidget):
     log_requested = Signal(str, str)
     versions_changed = Signal()
+    detail_requested = Signal(object)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -98,6 +100,12 @@ class ModsTab(QWidget):
         self.select_all_button.clicked.connect(lambda: self.table.selectAll())
         buttons.addWidget(self.select_all_button)
 
+        self.detail_button = QPushButton("查看详情")
+        self.detail_button.setObjectName("Ghost")
+        self.detail_button.setEnabled(False)
+        self.detail_button.clicked.connect(self._show_detail)
+        buttons.addWidget(self.detail_button)
+
         self.conflict_button = QPushButton("冲突检测")
         self.conflict_button.clicked.connect(self.check_conflicts)
         buttons.addWidget(self.conflict_button)
@@ -138,13 +146,18 @@ class ModsTab(QWidget):
         header.setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
         self.table.setColumnWidth(0, 52)
         header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
-        for column in (2, 3, 4, 5):
+        for column in (2, 3, 4, 5, 6):
             header.setSectionResizeMode(column, QHeaderView.ResizeMode.ResizeToContents)
-        header.setSectionResizeMode(6, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(7, QHeaderView.ResizeMode.Stretch)
         self.table.itemChanged.connect(self._on_item_changed)
         self.table.itemSelectionChanged.connect(self._update_batch_buttons)
+        self.table.itemSelectionChanged.connect(self._update_detail)
         self.table.cellDoubleClicked.connect(self._open_selected_file)
         layout.addWidget(self.table, 1)
+        self.detail = QLabel("选中 Mod 可查看作者与简介。")
+        self.detail.setObjectName("Hint")
+        self.detail.setWordWrap(True)
+        layout.addWidget(self.detail)
 
         hint = QLabel(
             "提示：按住 Ctrl / Shift 可以多选，再用“批量启用 / 批量禁用”一次处理多个 Mod。"
@@ -153,6 +166,7 @@ class ModsTab(QWidget):
         hint.setObjectName("Hint")
         hint.setWordWrap(True)
         layout.addWidget(hint)
+        self.loading = LoadingOverlay(self)
 
     @staticmethod
     def _label(text: str) -> QLabel:
@@ -217,6 +231,7 @@ class ModsTab(QWidget):
             return
         if not silent:
             self.status.setText("正在读取 Mod…")
+        self.loading.show_loading("正在读取 Mod 文件…")
         self.refresh_button.setEnabled(False)
 
         def work(progress, cancelled):
@@ -231,6 +246,7 @@ class ModsTab(QWidget):
         )
 
     def _on_loaded(self, payload) -> None:
+        self.loading.stop()
         mods, folder = payload
         self._mods = mods
         self._loaded_once = True
@@ -245,11 +261,18 @@ class ModsTab(QWidget):
         )
 
     def _on_failed(self, message: str) -> None:
+        self.loading.stop()
         self.refresh_button.setEnabled(True)
         self.status.setText("读取失败")
         self.status.setProperty("level", "error")
         self._repolish(self.status)
         self.log_requested.emit("error", f"读取 Mod 失败：{message}")
+
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        loading = getattr(self, "loading", None)
+        if loading is not None:
+            loading.setGeometry(self.rect())
 
     @staticmethod
     def _repolish(widget: QWidget) -> None:
@@ -278,17 +301,20 @@ class ModsTab(QWidget):
             self.table.setItem(row, 0, check)
 
             name_item = QTableWidgetItem(mod.display_name)
-            name_item.setToolTip(mod.description or mod.filename)
+            name_item.setToolTip(
+                f"作者：{mod.author or '未知'}\n{mod.description or mod.filename}"
+            )
             self.table.setItem(row, 1, name_item)
             self.table.setItem(row, 2, QTableWidgetItem(mod.display_version))
-            self.table.setItem(row, 3, QTableWidgetItem(mod.mod_id or "—"))
-            self.table.setItem(row, 4, QTableWidgetItem(mod.loader or "—"))
-            self.table.setItem(row, 5, QTableWidgetItem(human_size(mod.size)))
+            self.table.setItem(row, 3, QTableWidgetItem(mod.author or "—"))
+            self.table.setItem(row, 4, QTableWidgetItem(mod.mod_id or "—"))
+            self.table.setItem(row, 5, QTableWidgetItem(mod.loader or "—"))
+            self.table.setItem(row, 6, QTableWidgetItem(human_size(mod.size)))
             file_item = QTableWidgetItem(mod.filename)
             file_item.setToolTip(str(mod.path))
             if mod.error:
                 file_item.setToolTip(f"{mod.path}\n{mod.error}")
-            self.table.setItem(row, 6, file_item)
+            self.table.setItem(row, 7, file_item)
 
             if not mod.enabled:
                 brush = QBrush(QColor("#7d8799"))
@@ -306,7 +332,7 @@ class ModsTab(QWidget):
         for row in range(self.table.rowCount()):
             haystack = " ".join(
                 self.table.item(row, column).text() if self.table.item(row, column) else ""
-                for column in (1, 2, 3, 4, 6)
+                for column in (1, 2, 3, 4, 5, 7)
             ).lower()
             hidden = bool(needle) and needle not in haystack
             self.table.setRowHidden(row, hidden)
@@ -326,6 +352,41 @@ class ModsTab(QWidget):
         enabled = bool(self._selected_rows())
         self.batch_enable_button.setEnabled(enabled)
         self.batch_disable_button.setEnabled(enabled)
+        if hasattr(self, "detail_button"):
+            self.detail_button.setEnabled(enabled)
+
+    def _show_detail(self) -> None:
+        rows = self._selected_rows()
+        if not rows:
+            return
+        row = rows[0]
+        file_item = self.table.item(row, 7)
+        if file_item is None:
+            return
+        for mod in self._mods:
+            if mod.filename == file_item.text():
+                self.detail_requested.emit(mod)
+                return
+
+    def _update_detail(self) -> None:
+        rows = self._selected_rows()
+        if not rows:
+            self.detail.setText("选中 Mod 可查看作者与简介。")
+            return
+        row = rows[0]
+        name = self.table.item(row, 1).text() if self.table.item(row, 1) else ""
+        version = self.table.item(row, 2).text() if self.table.item(row, 2) else ""
+        author = self.table.item(row, 3).text() if self.table.item(row, 3) else ""
+        file_item = self.table.item(row, 7)
+        description = ""
+        if file_item is not None:
+            for mod in self._mods:
+                if mod.filename == file_item.text():
+                    description = mod.description
+                    break
+        self.detail.setText(
+            f"{name} · {version} · 作者：{author or '未知'}\n{description or '暂无简介'}"
+        )
 
     def _batch_set_enabled(self, enabled: bool) -> None:
         rows = self._selected_rows()
@@ -409,7 +470,7 @@ class ModsTab(QWidget):
         for row in range(self.table.rowCount()):
             cell = self.table.item(row, 0)
             if cell is not None and cell.data(Qt.ItemDataRole.UserRole) == str(new_path):
-                file_item = self.table.item(row, 6)
+                file_item = self.table.item(row, 7)
                 if file_item is not None:
                     file_item.setText(new_path.name)
                 brush = QBrush(QColor("#7d8799"))
@@ -499,7 +560,7 @@ class ModsTab(QWidget):
             )
         )
         box.setDetailedText("\n".join(lines))
-        box.exec()
+        run_in_window(self, box, "Mod 检测结果")
         self.log_requested.emit(
             "warn" if not report.healthy else "success",
             f"Mod 冲突检测：{'发现问题' if not report.healthy else '未发现问题'}（{len(self._mods)} 个 Mod）",
@@ -548,7 +609,7 @@ class ModsTab(QWidget):
             return
         self.log_requested.emit("info", f"发现 {len(updates)} 个 Mod 可更新")
         dialog = ModUpdateDialog(self, updates, self.game_dir / "mods")
-        dialog.exec()
+        run_in_window(self, dialog, "Mod 更新")
         if dialog.updated_count:
             self.log_requested.emit(
                 "success", f"已更新 {dialog.updated_count} 个 Mod，重新加载列表"
@@ -691,7 +752,7 @@ class ModUpdateDialog(QDialog):
             box.setIcon(QMessageBox.Icon.Warning)
             box.setText(f"{len(failures)} 个 Mod 更新失败")
             box.setDetailedText("\n".join(failures))
-            box.exec()
+            run_in_window(self, box, "Mod 检测结果")
 
     def _on_update_error(self, message: str) -> None:
         self._busy = False

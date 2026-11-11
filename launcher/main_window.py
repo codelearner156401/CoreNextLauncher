@@ -7,7 +7,7 @@ import re
 import time
 from pathlib import Path
 
-from PySide6.QtCore import QRect, Qt, QTimer, QUrl
+from PySide6.QtCore import QEventLoop, QRect, Qt, QTimer, QUrl
 from PySide6.QtGui import (
     QAction,
     QCloseEvent,
@@ -41,15 +41,23 @@ from .paths import ensure_workspace, workspace_root
 from .services import backup as backup_service
 from .services import crash as crash_service
 from .services import java_install
+from .services import isolation
 from .services import java_scan
+from .services import mods as mods_service
 from .services import updater
 from .theme import THEME_LABELS, apply_acrylic, apply_theme, apply_window_effects
 from .ui.account_dialog import AccountDialog
 from .ui.crash_dialog import CrashDialog
+from .ui.dialog_page import DialogPage, run_in_window
 from .ui.glass import BackgroundWidget, GlassFrame
 from .ui.instance_page import InstancePage
+from .ui.inwindow import install as install_inwindow_hooks, install_input_hooks, install_file_hooks, install_color_hooks, set_host as set_inwindow_host
+from .ui.loading_overlay import LoadingOverlay
+from .ui.mod_detail_page import ModDetailPage
 from .ui.pages import InstallPage, LogPage, SettingsPage
+from .ui.skin_page import SkinPage
 from .ui.start_page import StartPage
+from .ui.version_browser import VersionBrowserPage
 from .ui.tasks import cancel_tasks, start_task
 from .ui.toolbox import ModpackImportDialog, ToolboxPage
 from .ui.update_dialog import UpdateDialog
@@ -115,6 +123,11 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.client = client
         self.config = config
+        set_inwindow_host(self)
+        install_inwindow_hooks()
+        install_input_hooks()
+        install_file_hooks()
+        install_color_hooks()
         anim.set_speed(getattr(config, "animation_speed", 1.0))
         self.workspace = ensure_workspace()
         # Developer mode and offline login are session-only: wipe them before
@@ -177,6 +190,7 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(self.toolbox_page, "百宝箱")
         self.tabs.addTab(self.log_page, "日志")
         self.tabs.addTab(self.settings_page, "设置")
+        self.tabs.setCurrentIndex(0)
         right.addWidget(self.tabs, 1)
         body.addLayout(right, 1)
         outer.addLayout(body, 1)
@@ -188,6 +202,8 @@ class MainWindow(QMainWindow):
             lambda message: self.log_page.log("warn", message)
         )
         self._apply_appearance()
+        self.loading_overlay = LoadingOverlay(self)
+        self.loading_overlay.setGeometry(self.rect())
         _values = self.settings_page.values()
         self.start_page.set_environment(
             str(_values.get("java_path", "") or ""),
@@ -380,6 +396,40 @@ class MainWindow(QMainWindow):
         self.start_page.open_logs_requested.connect(
             lambda: self.tabs.setCurrentWidget(self.log_page)
         )
+        self.start_page.log_requested.connect(self.log_page.log)
+        self.start_page.skin_requested.connect(self.open_skin_page)
+        self.install_page.browse_requested.connect(self.open_version_browser)
+        self.toolbox_page.mods_tab.detail_requested.connect(self.open_mod_detail)
+
+    def run_dialog(self, dialog, title: str = "") -> int:
+        page = DialogPage(dialog, title or getattr(dialog, "windowTitle", lambda: "对话")())
+        loop = QEventLoop()
+        dialog.finished.connect(lambda _result: loop.quit())
+        self.tabs.push_page(page)
+        loop.exec()
+        self.tabs.pop_page()
+        return int(dialog.result())
+
+    def push_subpage(self, page) -> None:
+        page.back_requested.connect(self.tabs.pop_page)
+        self.tabs.push_page(page)
+
+    def open_version_browser(self) -> None:
+        page = VersionBrowserPage()
+        page.install_requested.connect(self.start_install)
+        page.install_requested.connect(lambda _version: self.tabs.pop_page())
+        self.push_subpage(page)
+
+    def open_skin_page(self) -> None:
+        page = SkinPage()
+        page.set_account(self.account)
+        page.log_requested.connect(self.log_page.log)
+        self.push_subpage(page)
+
+    def open_mod_detail(self, mod) -> None:
+        page = ModDetailPage()
+        page.set_mod(mod)
+        self.push_subpage(page)
 
     def _open_game_folder(self) -> None:
         game_dir = str(self.settings_page.values().get("game_dir", "") or "")
@@ -421,6 +471,9 @@ class MainWindow(QMainWindow):
         if grip is not None:
             grip.move(self.width() - grip.width() - 2, self.height() - grip.height() - 2)
             grip.raise_()
+        overlay = getattr(self, "loading_overlay", None)
+        if overlay is not None:
+            overlay.setGeometry(self.rect())
 
     def showEvent(self, event) -> None:  # noqa: N802
         super().showEvent(event)
@@ -466,15 +519,21 @@ class MainWindow(QMainWindow):
         worker.failed.connect(self._on_scan_failed)
         worker.finished.connect(lambda: self._scan_finished(worker))
         self._scan_worker = worker
+        if hasattr(self, "loading_overlay"):
+            self.loading_overlay.show_loading("正在扫描版本文件…")
         worker.start()
 
     def _scan_finished(self, worker: ScanWorker) -> None:
+        if hasattr(self, "loading_overlay"):
+            self.loading_overlay.stop()
         self.refresh_button.setEnabled(True)
         if self._scan_worker is worker:
             self._scan_worker = None
         worker.deleteLater()
 
     def _on_scan_failed(self, message: str) -> None:
+        if hasattr(self, "loading_overlay"):
+            self.loading_overlay.stop()
         self.footer.setText("扫描失败")
         self.empty_hint.show()
         self.log_page.log("error", f"版本扫描失败：{message}")
@@ -629,8 +688,15 @@ class MainWindow(QMainWindow):
                 return
             account_payload = online.launch_account()
 
+        launch_game_dir = isolation.game_dir(game_dir, version_id)
+        if launch_game_dir != game_dir:
+            self.log_page.log("info", f"版本隔离已启用：{launch_game_dir}")
+        if not self._preflight_mods(launch_game_dir):
+            return
+
         payload = {
             "mc_dir": str(game_dir),
+            "game_dir": str(launch_game_dir),
             "version_id": version_id,
             "account": account_payload,
             "java_path": java_path,
@@ -661,9 +727,52 @@ class MainWindow(QMainWindow):
         else:
             self._launch_now(payload)
 
+    def _preflight_mods(self, game_dir: Path) -> bool:
+        try:
+            mod_list, _folder = mods_service.load_mods(game_dir)
+        except Exception:
+            return True
+        if not mod_list:
+            return True
+        report = mods_service.scan_conflicts(mod_list)
+        if report.healthy:
+            self.log_page.log("muted", f"启动前 Mod 预扫描：{len(mod_list)} 个 Mod，未发现冲突。")
+            return True
+        lines = [f"启动前扫描到 {len(mod_list)} 个 Mod，存在以下问题：", ""]
+        if report.duplicates:
+            lines.append("重复 Mod ID：")
+            for mod_id, names in sorted(report.duplicates.items()):
+                lines.append(f"  · {mod_id}：{', '.join(sorted(names))}")
+        if report.duplicate_files:
+            lines.append("同名 jar 文件：")
+            for _name, names in sorted(report.duplicate_files.items()):
+                lines.append(f"  · {', '.join(sorted(names))}")
+        if report.missing:
+            lines.append("缺失前置：")
+            for owner, dep, jar in report.missing[:25]:
+                lines.append(f"  · {owner} 需要 {dep}（{jar}）")
+        if report.disabled_deps:
+            lines.append("前置已安装但被禁用：")
+            for owner, dep, jar in report.disabled_deps[:15]:
+                lines.append(f"  · {owner} 需要 {dep}（{jar}）")
+        lines.append("")
+        lines.append("仍要继续启动吗？")
+        answer = QMessageBox.question(
+            self,
+            "Mod 启动前预检测",
+            "\n".join(lines),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            self.log_page.log("warn", "已取消启动：Mod 预检测发现问题。")
+            return False
+        self.log_page.log("warn", "用户选择忽略 Mod 预检测问题，继续启动。")
+        return True
+
     # ------------------------------------------------------- pre-launch backup
     def _backup_then_launch(self, payload: dict) -> None:
-        game_dir = Path(str(payload.get("mc_dir", "")))
+        game_dir = Path(str(payload.get("game_dir") or payload.get("mc_dir", "")))
         if not (game_dir / "saves").is_dir():
             self._launch_now(payload)
             return
@@ -886,7 +995,7 @@ class MainWindow(QMainWindow):
             return
         self.log_page.log("info", f"发现新版本 {info.version}（当前 {APP_VERSION}）")
         dialog = UpdateDialog(self, info, on_log=self.log_page.log)
-        dialog.exec()
+        self.run_dialog(dialog, "启动器更新")
 
     def _on_update_check_failed(self, message: str, silent: bool) -> None:
         self.settings_page.check_update_button.setEnabled(True)
@@ -934,7 +1043,7 @@ class MainWindow(QMainWindow):
             on_versions_changed=self.refresh_versions,
             on_install_version=self._install_from_toolbox,
         )
-        dialog.exec()
+        self.run_dialog(dialog, "导入整合包")
 
     @staticmethod
     def _required_java_major(version_data: dict, version_id: str) -> int:
@@ -1144,7 +1253,7 @@ class MainWindow(QMainWindow):
             self.account_button.setText(self.account.name)
             self.account_button.setToolTip(f"{self.account.name}\n{self.account.uuid}")
         self.settings_page.set_account(self.account)
-        self.start_page.set_account(self.account.name if self.account else "")
+        self.start_page.set_account(self.account)
 
     def open_account(self) -> None:
         dialog = AccountDialog(
@@ -1152,7 +1261,7 @@ class MainWindow(QMainWindow):
         )
         dialog.logged_in.connect(self._on_account_login)
         dialog.logged_out.connect(self.logout_account)
-        dialog.exec()
+        self.run_dialog(dialog, "Microsoft 正版登录")
 
     def _on_account_login(self, account) -> None:
         self.account = account
@@ -1298,7 +1407,7 @@ class MainWindow(QMainWindow):
                 "muted", "可疑 Mod：" + "、".join(analysis.suspect_mods)
             )
         dialog = CrashDialog(self, analysis, game_dir)
-        dialog.exec()
+        self.run_dialog(dialog, "崩溃诊断")
 
     def _on_launch_failed(self, message: str) -> None:
         self._launch_reported = True

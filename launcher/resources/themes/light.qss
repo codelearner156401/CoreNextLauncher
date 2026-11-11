@@ -875,3 +875,18 @@ QLabel#InfoValue { color: #1e293b; font-size: 12px; font-weight: 600; }
 /* v1.8.1 translucent acrylic window */
 QMainWindow { background: transparent; }
 QWidget#Root { background: transparent; }
+
+/* v1.9 skin panel */
+QFrame#SkinPanel {
+    background: rgba(255,255,255,0.60);
+    border: 1px solid rgba(15,23,42,0.08);
+    border-radius: 14px;
+}
+QListWidget#SkinList {
+    background: rgba(255,255,255,0.55);
+    border: 1px solid rgba(15,23,42,0.08);
+    border-radius: 9px;
+    padding: 4px;
+}
+QListWidget#SkinList::item { padding: 7px 9px; border-radius: 6px; }
+QListWidget#SkinList::item:selected { background: #e8f0fe; color: #1d4ed8; }

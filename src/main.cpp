@@ -53,8 +53,12 @@ int main(int argc, char** argv) {
                     if (item.is_string()) jvm_args.push_back(item.get<std::string>());
                 }
             }
-            auto argv_list = build_launch_command(vjson, mc_dir, vid, input["account"], input.value("java_path", "java"), input.value("max_mem", "auto"), input.value("min_mem", "auto"), true, input.value("offline_mode", false), extra_args, jvm_args);
-            int code = spawn_and_wait(argv_list, mc_dir);
+            fs::path game_dir;
+            if (input.contains("game_dir") && input["game_dir"].is_string()) {
+                game_dir = input["game_dir"].get<std::string>();
+            }
+            auto argv_list = build_launch_command(vjson, mc_dir, vid, input["account"], input.value("java_path", "java"), input.value("max_mem", "auto"), input.value("min_mem", "auto"), true, input.value("offline_mode", false), extra_args, jvm_args, game_dir);
+            int code = spawn_and_wait(argv_list, game_dir.empty() ? mc_dir : game_dir);
             event::done({{"exit_code", code}});
         } else if (cmd == "install") {
             fs::path mc_dir = input["mc_dir"].get<std::string>();

@@ -8,6 +8,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QPushButton,
+    QScrollArea,
     QVBoxLayout,
     QWidget,
 )
@@ -20,10 +21,22 @@ class StartPage(QWidget):
     launch_requested = Signal()
     open_folder_requested = Signal()
     open_logs_requested = Signal()
+    log_requested = Signal(str, str)
+    skin_requested = Signal()
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
-        layout = QVBoxLayout(self)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        outer.addWidget(scroll)
+        content = QWidget()
+        content.setObjectName("PageInner")
+        scroll.setWidget(content)
+        layout = QVBoxLayout(content)
         layout.setContentsMargins(2, 8, 12, 8)
         layout.setSpacing(14)
 
@@ -75,6 +88,10 @@ class StartPage(QWidget):
         self.logs_button.setObjectName("Ghost")
         self.logs_button.clicked.connect(self.open_logs_requested.emit)
         quick.addWidget(self.logs_button)
+        self.skin_button = QPushButton("皮肤管理")
+        self.skin_button.setObjectName("Ghost")
+        self.skin_button.clicked.connect(self.skin_requested.emit)
+        quick.addWidget(self.skin_button)
         quick.addStretch(1)
         layout.addLayout(quick)
         layout.addStretch(1)
@@ -104,7 +121,11 @@ class StartPage(QWidget):
             self.version_label.setText("尚未选择版本")
             self.version_meta.setText("请选择左侧版本库中的游戏版本")
 
-    def set_account(self, name: str) -> None:
+    def set_account(self, account) -> None:
+        if account is None:
+            self.account_value.setText("未登录")
+            return
+        name = getattr(account, "name", "") or str(account)
         self.account_value.setText(name or "未登录")
 
     def set_environment(self, java: str = "", memory: str = "") -> None:

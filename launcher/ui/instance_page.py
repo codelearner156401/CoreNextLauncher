@@ -16,6 +16,8 @@ from PySide6.QtWidgets import (
     QInputDialog,
     QLabel,
     QLineEdit,
+    QListWidget,
+    QListWidgetItem,
     QMessageBox,
     QPushButton,
     QTableWidget,
@@ -24,9 +26,10 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from ..services import instances
+from ..services import instances, isolation
 from ..services.util import human_age
 from .tasks import start_task
+from .dialog_page import run_in_window
 from .widgets import HoverCard, ShimmerProgressBar
 from .toolbox.common import open_path
 
@@ -46,6 +49,111 @@ def _card(title: str, subtitle: str = ""):
         note.setWordWrap(True)
         layout.addWidget(note)
     return frame, layout
+
+
+class IsolationDialog(QDialog):
+    """Per-version resource isolation toggle dialog."""
+
+    def __init__(self, instance: Path, parent=None) -> None:
+        super().__init__(parent)
+        self.instance = Path(instance)
+        self.setWindowTitle("版本隔离")
+        self.resize(520, 430)
+        layout = QVBoxLayout(self)
+        layout.setSpacing(10)
+        note = QLabel(
+            "开启后，该版本单独使用 versions/<版本>/ 下的 mods、config、saves、resourcepacks；"
+            "关闭时会把隔离资源合并回实例公共目录。"
+        )
+        note.setObjectName("Muted")
+        note.setWordWrap(True)
+        layout.addWidget(note)
+        self.list = QListWidget()
+        self.list.setObjectName("IsolationList")
+        layout.addWidget(self.list, 1)
+        self._versions = self._load_versions()
+        enabled = isolation.load_state(self.instance)
+        for version in self._versions:
+            item = QListWidgetItem(version)
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            item.setCheckState(
+                Qt.CheckState.Checked if version in enabled else Qt.CheckState.Unchecked
+            )
+            item.setData(Qt.ItemDataRole.UserRole, version in enabled)
+            self.list.addItem(item)
+        if not self._versions:
+            self.list.addItem("该实例没有可用的 versions 版本")
+        buttons = QHBoxLayout()
+        buttons.addStretch(1)
+        cancel = QPushButton("取消")
+        cancel.setObjectName("Ghost")
+        cancel.clicked.connect(self.reject)
+        buttons.addWidget(cancel)
+        apply_button = QPushButton("应用")
+        apply_button.setObjectName("Primary")
+        apply_button.clicked.connect(self._apply)
+        buttons.addWidget(apply_button)
+        layout.addLayout(buttons)
+
+    def _load_versions(self) -> list[str]:
+        folder = self.instance / "versions"
+        if not folder.is_dir():
+            return []
+        versions = []
+        for path in sorted(folder.iterdir()):
+            if path.is_dir() and (path / f"{path.name}.json").is_file():
+                versions.append(path.name)
+        return versions
+
+    def _apply(self) -> None:
+        if not self._versions:
+            self.accept()
+            return
+        changes_enable = []
+        changes_disable = []
+        for row, version in enumerate(self._versions):
+            item = self.list.item(row)
+            if item is None:
+                continue
+            was = bool(item.data(Qt.ItemDataRole.UserRole))
+            now = item.checkState() == Qt.CheckState.Checked
+            if now and not was:
+                changes_enable.append(version)
+            elif was and not now:
+                changes_disable.append(version)
+        if changes_enable:
+            answer = QMessageBox.question(
+                self,
+                "开启版本隔离",
+                "将为以下版本创建独立资源目录，并把公共 mods / config / saves / resourcepacks 复制进去：\n"
+                + ", ".join(changes_enable)
+                + "\n\n继续吗？",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.Yes,
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+        if changes_disable:
+            answer = QMessageBox.question(
+                self,
+                "关闭版本隔离",
+                "将把隔离目录中的资源合并回实例公共目录，并删除隔离资源文件夹：\n"
+                + ", ".join(changes_disable)
+                + "\n\n请确认不会覆盖重要文件，继续吗？",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+        try:
+            for version in changes_enable:
+                isolation.set_isolation(self.instance, version, True, migrate=True)
+            for version in changes_disable:
+                isolation.set_isolation(self.instance, version, False, migrate=True)
+        except (OSError, FileNotFoundError) as exc:
+            QMessageBox.warning(self, "版本隔离失败", str(exc))
+            return
+        self.accept()
 
 
 class InstancePage(QWidget):
@@ -106,6 +214,11 @@ class InstancePage(QWidget):
         self.clone_button.setEnabled(False)
         self.clone_button.clicked.connect(self.clone_selected)
         buttons.addWidget(self.clone_button)
+        self.isolation_button = QPushButton("版本隔离")
+        self.isolation_button.setObjectName("Ghost")
+        self.isolation_button.setEnabled(False)
+        self.isolation_button.clicked.connect(self.manage_isolation)
+        buttons.addWidget(self.isolation_button)
         self.activate_button = QPushButton("设为当前")
         self.activate_button.setEnabled(False)
         self.activate_button.clicked.connect(self.activate_selected)
@@ -200,6 +313,7 @@ class InstancePage(QWidget):
         has = self._selected() is not None
         for button in (
             self.clone_button,
+            self.isolation_button,
             self.activate_button,
             self.open_button,
             self.delete_button,
@@ -225,7 +339,7 @@ class InstancePage(QWidget):
         if source is None or self._busy:
             return
         dialog = CloneInstanceDialog(self, source.name)
-        if dialog.exec() != QDialog.DialogCode.Accepted:
+        if run_in_window(self, dialog, "克隆实例") != QDialog.DialogCode.Accepted:
             return
         name, include_saves = dialog.values()
         self._busy = True
@@ -289,6 +403,15 @@ class InstancePage(QWidget):
         self._busy = False
         self.refresh_button.setEnabled(True)
         self._update_buttons()
+
+    def manage_isolation(self) -> None:
+        info = self._selected()
+        if info is None:
+            return
+        dialog = IsolationDialog(info.path, self)
+        if run_in_window(self, dialog, "版本隔离") == QDialog.DialogCode.Accepted:
+            self.log_requested.emit("success", f"版本隔离设置已更新：{info.name}")
+            self.refresh()
 
     def activate_selected(self) -> None:
         info = self._selected()

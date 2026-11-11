@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
 
 from ..services import crash as crash_service
 from .ai_dialog import AIDialog, api_key_configured
+from .dialog_page import run_in_window
 
 
 class CrashDialog(QDialog):
@@ -140,7 +141,7 @@ class CrashDialog(QDialog):
 
     def _open_ai(self) -> None:
         dialog = AIDialog(self, self.game_dir, self.analysis.raw)
-        dialog.exec()
+        run_in_window(self, dialog, "AI 诊断")
 
     def _detect_game_dir(self) -> Path | None:
         if self.analysis.report_path is not None:

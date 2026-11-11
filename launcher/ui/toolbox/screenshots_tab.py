@@ -188,7 +188,7 @@ class ScreenshotsTab(QWidget):
             return
         dialog = ScreenshotViewer(self, self.items, index)
         dialog.deleted.connect(lambda path: self._on_deleted(path))
-        dialog.exec()
+        run_in_window(self, dialog, "截图查看")
 
     def _on_deleted(self, path: str) -> None:
         self.log_requested.emit("info", f"已删除截图：{Path(path).name}")

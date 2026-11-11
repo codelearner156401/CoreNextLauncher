@@ -36,6 +36,7 @@ class ModFile:
     mod_id: str = ""
     name: str = ""
     version: str = ""
+    author: str = ""
     loader: str = ""
     description: str = ""
     depends: dict[str, str] = field(default_factory=dict)
@@ -97,6 +98,22 @@ def list_mod_files(game_dir: str | Path) -> list[Path]:
     return sorted(files, key=lambda item: item.name.lower())
 
 
+def _authors_text(value) -> str:
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, list):
+        names = []
+        for item in value:
+            if isinstance(item, str):
+                names.append(item)
+            elif isinstance(item, dict):
+                names.append(str(item.get("name") or item.get("author") or ""))
+        return ", ".join(name for name in names if name)
+    if isinstance(value, dict):
+        return str(value.get("name") or value.get("author") or "")
+    return ""
+
+
 def _read_fabric_meta(archive: zipfile.ZipFile, names: set[str]) -> dict | None:
     if "fabric.mod.json" not in names:
         return None
@@ -109,6 +126,7 @@ def _read_fabric_meta(archive: zipfile.ZipFile, names: set[str]) -> dict | None:
         "mod_id": str(raw.get("id") or ""),
         "name": str(raw.get("name") or ""),
         "version": str(raw.get("version") or ""),
+        "author": _authors_text(raw.get("authors") or raw.get("author")),
         "description": str(raw.get("description") or ""),
         "depends": {str(k): str(v) for k, v in depends.items()},
     }
@@ -131,6 +149,7 @@ def _read_quilt_meta(archive: zipfile.ZipFile, names: set[str]) -> dict | None:
         "mod_id": str(loader_block.get("id") or ""),
         "name": str(metadata.get("name") or ""),
         "version": str(loader_block.get("version") or ""),
+        "author": _authors_text(metadata.get("authors") or metadata.get("author")),
         "description": str(metadata.get("description") or ""),
         "depends": deps,
     }
@@ -165,6 +184,7 @@ def _read_forge_meta(archive: zipfile.ZipFile, names: set[str]) -> dict | None:
             "mod_id": str(first.get("modId") or ""),
             "name": str(first.get("displayName") or ""),
             "version": str(first.get("version") or ""),
+            "author": _authors_text(first.get("authors") or first.get("author")),
             "description": str(first.get("description") or ""),
             "depends": depends,
         }
@@ -194,6 +214,7 @@ def _read_manifest_meta(archive: zipfile.ZipFile, names: set[str]) -> dict | Non
         "mod_id": "",
         "name": title,
         "version": version,
+        "author": "",
         "description": "",
         "depends": {},
     }
@@ -251,6 +272,7 @@ def load_mods(game_dir: str | Path) -> tuple[list[ModFile], Path]:
                 mod_id=str(meta.get("mod_id") or ""),
                 name=str(meta.get("name") or ""),
                 version=str(meta.get("version") or ""),
+                author=str(meta.get("author") or ""),
                 loader=str(meta.get("loader") or ""),
                 description=str(meta.get("description") or ""),
                 depends=dict(meta.get("depends") or {}),

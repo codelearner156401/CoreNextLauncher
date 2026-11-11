@@ -251,7 +251,7 @@ class ModpackTab(QWidget):
         box.setInformativeText("\n".join(lines))
         if result.failed:
             box.setDetailedText("\n".join(result.failed))
-        box.exec()
+        run_in_window(self, box, "整合包导入结果")
         self.log_requested.emit(
             "success" if not result.failed else "warn",
             f"整合包导入：{result.pack.name} · 下载 {result.downloaded} 个文件",

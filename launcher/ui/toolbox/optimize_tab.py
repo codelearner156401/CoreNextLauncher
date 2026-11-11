@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
 from ...services import fabric_install, java_install, java_scan
 from ..widgets import ShimmerProgressBar, natural_key
 from .common import card, human_size, start_task
+from ..dialog_page import run_in_window
 
 JAVA_MAJORS = (21, 17, 25, 8)
 
@@ -402,7 +403,7 @@ class OptimizeTab(QWidget):
             f"依赖库：{result.fabric.libraries} 个已下载，{result.fabric.skipped} 个已存在\n"
             f"优化 Mod：\n{details}"
         )
-        box.exec()
+        run_in_window(self, box, "优化完成")
         self.log_requested.emit(
             "success",
             f"一键优化完成：Fabric {result.fabric.loader_version} + {len(result.mods)} 个 Mod",

@@ -6,9 +6,10 @@ import ctypes
 import os
 from pathlib import Path
 
-from PySide6.QtCore import QTimer, Qt, QUrl, Signal
+from PySide6.QtCore import QSize, QTimer, Qt, QUrl, Signal
 from PySide6.QtGui import QColor, QDesktopServices, QLinearGradient, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
+    QAbstractItemView,
     QApplication,
     QCheckBox,
     QColorDialog,
@@ -40,6 +41,8 @@ from ..services import catalog
 from ..services import java_scan
 from ..services import jvm
 from .tasks import start_task
+from .dialog_page import run_in_window
+from .version_card import VersionCardDelegate
 from .widgets import (
     TYPE_LABELS,
     ClickableLabel,
@@ -712,7 +715,7 @@ class SettingsPage(QWidget):
         self.style_combo.currentIndexChanged.connect(self._on_style_changed)
         style_row.addWidget(self.style_combo)
         style_row.addStretch(1)
-        style_hint = QLabel("液态玻璃 / 毛玻璃 / HTML 风格，各自独立记忆设置")
+        style_hint = QLabel("液态玻璃 / 毛玻璃 / HTML 界面，各自独立记忆设置")
         style_hint.setObjectName("Hint")
         style_row.addWidget(style_hint)
         layout.addLayout(style_row)
@@ -1578,7 +1581,7 @@ class SettingsPage(QWidget):
         )
         box.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
         box.setDefaultButton(QMessageBox.StandardButton.No)
-        if box.exec() != QMessageBox.StandardButton.Yes:
+        if run_in_window(self, box, "离线模式警告") != QMessageBox.StandardButton.Yes:
             self.offline_check.blockSignals(True)
             self.offline_check.setChecked(False)
             self.offline_check.blockSignals(False)
@@ -1716,6 +1719,7 @@ class SettingsPage(QWidget):
 class InstallPage(QWidget):
     log_requested = Signal(str, str)
     install_requested = Signal(str)
+    browse_requested = Signal()
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -1763,6 +1767,10 @@ class InstallPage(QWidget):
         self.catalog_refresh.setObjectName("Ghost")
         self.catalog_refresh.clicked.connect(self.load_catalog)
         filter_row.addWidget(self.catalog_refresh)
+        self.catalog_browse = QPushButton("全屏浏览")
+        self.catalog_browse.setObjectName("Ghost")
+        self.catalog_browse.clicked.connect(self.browse_requested.emit)
+        filter_row.addWidget(self.catalog_browse)
         self.catalog_install = QPushButton("安装选中版本")
         self.catalog_install.setObjectName("Primary")
         self.catalog_install.setEnabled(False)
@@ -1772,7 +1780,17 @@ class InstallPage(QWidget):
 
         self.catalog_list = QListWidget()
         self.catalog_list.setObjectName("CatalogList")
-        self.catalog_list.setMaximumHeight(150)
+        self.catalog_list.setMaximumHeight(272)
+        self.catalog_list.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        self.catalog_list.setSpacing(1)
+        self.catalog_list.setUniformItemSizes(True)
+        self.catalog_list.setMouseTracking(True)
+        self.catalog_list.setVerticalScrollMode(
+            QAbstractItemView.ScrollMode.ScrollPerPixel
+        )
+        self.catalog_list.setItemDelegate(VersionCardDelegate(self.catalog_list))
         self.catalog_list.itemSelectionChanged.connect(self._on_catalog_selected)
         self.catalog_list.itemDoubleClicked.connect(
             lambda _item: self._install_catalog_selection()
@@ -1941,6 +1959,7 @@ class InstallPage(QWidget):
                 label += "  · 旧版"
             item = QListWidgetItem(label)
             item.setData(Qt.ItemDataRole.UserRole, entry)
+            item.setSizeHint(QSize(100, 64))
             self.catalog_list.addItem(item)
             shown += 1
         self.catalog_list.blockSignals(False)

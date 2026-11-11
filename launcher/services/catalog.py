@@ -15,6 +15,7 @@ class VersionEntry:
     type: str
     release_time: str
     url: str
+    recommended: bool = False
 
 
 def fetch_versions() -> list[VersionEntry]:
@@ -22,6 +23,13 @@ def fetch_versions() -> list[VersionEntry]:
     versions = payload.get("versions") if isinstance(payload, dict) else None
     if not isinstance(versions, list):
         raise RuntimeError("Mojang 版本清单格式异常")
+    latest = payload.get("latest") if isinstance(payload, dict) else {}
+    recommended_ids = set()
+    if isinstance(latest, dict):
+        recommended_ids = {
+            str(latest.get("release") or ""),
+            str(latest.get("snapshot") or ""),
+        }
     entries: list[VersionEntry] = []
     for item in versions:
         if not isinstance(item, dict):
@@ -35,6 +43,7 @@ def fetch_versions() -> list[VersionEntry]:
                 type=str(item.get("type") or "release"),
                 release_time=str(item.get("releaseTime") or ""),
                 url=str(item.get("url") or ""),
+                recommended=version_id in recommended_ids,
             )
         )
     return entries

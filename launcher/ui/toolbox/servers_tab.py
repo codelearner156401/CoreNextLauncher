@@ -184,7 +184,7 @@ class ServersTab(QWidget):
                 except OSError:
                     versions = []
         dialog = AddServerDialog(self, versions)
-        if dialog.exec() != QDialog.DialogCode.Accepted:
+        if run_in_window(self, dialog, "服务器配置") != QDialog.DialogCode.Accepted:
             return
         entry = dialog.entry()
         if not entry.address:

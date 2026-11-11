@@ -7,6 +7,7 @@ Every installation keeps a single portable workspace next to the program::
         config/       launcher_config.json / account.json / secrets.json ...
         kernel/       mc_core.exe and the managed Java runtime
         instances/    one folder per Minecraft instance
+        skins/        imported / official Minecraft skins
         cache/        downloads, server icons, update packages
         logs/         launcher logs
         exports/      exported modpack output
@@ -123,6 +124,10 @@ def exports_dir() -> Path:
     return workspace_root() / "exports"
 
 
+def skins_dir() -> Path:
+    return workspace_root() / "skins"
+
+
 def default_instance_dir() -> Path:
     return instances_dir() / "default"
 
@@ -141,6 +146,7 @@ class Workspace:
     cache: Path
     logs: Path
     exports: Path
+    skins: Path
 
 
 def _legacy_state_dirs() -> list[Path]:
@@ -212,6 +218,7 @@ def ensure_workspace() -> Workspace:
         cache=root / "cache",
         logs=root / "logs",
         exports=root / "exports",
+        skins=root / "skins",
     )
     for folder in (
         workspace.config,
@@ -220,6 +227,7 @@ def ensure_workspace() -> Workspace:
         workspace.cache,
         workspace.logs,
         workspace.exports,
+        workspace.skins,
     ):
         folder.mkdir(parents=True, exist_ok=True)
     _migrate_legacy_config(workspace)
