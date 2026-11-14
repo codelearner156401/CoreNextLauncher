@@ -31,6 +31,7 @@ class UpdateDialog(QDialog):
         self.on_log = on_log
         self._busy = False
         self._downloaded: Path | None = None
+        self._download_notes: list[str] = []
         self.setObjectName("ToolboxDialog")
         self.setWindowTitle("发现新版本")
         self.resize(700, 540)
@@ -116,11 +117,14 @@ class UpdateDialog(QDialog):
         self.progress.setRange(0, 0)
         self.status.setText("正在下载更新…")
 
+        self._download_notes = []
+
         def work(progress, cancelled):
             return updater.download_update(
                 self.info,
                 progress=lambda done, total: progress("", done, total),
                 cancel=cancelled,
+                notes=self._download_notes,
             )
 
         start_task(
@@ -156,6 +160,15 @@ class UpdateDialog(QDialog):
         self.status.setText(f"已下载到 {path}；点击“立即重启安装”完成替换。")
         if self.on_log is not None:
             self.on_log("success", f"更新包已下载：{path}")
+        self._report_notes()
+
+    def _report_notes(self) -> None:
+        """Surface the downloader's verification notes in the status line and log."""
+        notes, self._download_notes = self._download_notes, []
+        for note in notes:
+            self.status.setText(f"{self.status.text()}\n{note}")
+            if self.on_log is not None:
+                self.on_log("warn", note)
 
     def _on_failed(self, message: str) -> None:
         self._busy = False

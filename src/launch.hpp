@@ -74,7 +74,7 @@ inline std::vector<std::string> build_launch_command(const json& vjson, const fs
         {"${version_type}", vjson.value("type", "release")},
         {"${natives_directory}", fs::absolute(mc_dir / "versions" / vid / "natives").u8string()},
         {"${launcher_name}", "CoreNextLauncher"},
-        {"${launcher_version}", "1.9.2"},
+        {"${launcher_version}", "1.9.4"},
         {"${classpath}", classpath}};
     auto replace = [&](std::string s) {
         for (auto& [key, value] : ph) {

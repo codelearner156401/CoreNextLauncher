@@ -32,6 +32,7 @@ class ReleaseAsset:
     url: str
     size: int = 0
     content_type: str = ""
+    digest: str = ""
 
 
 @dataclass
@@ -103,6 +104,7 @@ def _pick_asset(assets: list[dict]) -> ReleaseAsset | None:
         url=str(chosen.get("browser_download_url") or ""),
         size=int(chosen.get("size") or 0),
         content_type=str(chosen.get("content_type") or ""),
+        digest=str(chosen.get("digest") or ""),
     )
 
 
@@ -142,10 +144,26 @@ def check(repo: str, current_version: str, timeout: float = 20.0) -> UpdateInfo 
     return info
 
 
+def split_digest(digest: str) -> tuple[str, str]:
+    """``"sha256:abc"`` → ``("sha256", "abc")``; empty when unusable.
+
+    GitHub publishes the checksum of a release asset in the asset metadata, so
+    the hash can be verified without fetching a separate `.sha256` file.
+    """
+    algorithm, _, value = str(digest or "").strip().lower().partition(":")
+    algorithm = algorithm.strip()
+    value = value.strip()
+    if algorithm not in {"sha1", "sha256"} or not value:
+        return "", ""
+    return algorithm, value
+
+
 def download_update(
     info: UpdateInfo,
     progress: net.ProgressCallback | None = None,
     cancel: net.CancelCallback | None = None,
+    *,
+    notes: list[str] | None = None,
 ) -> Path:
     if info.asset is None or not info.asset.url:
         raise UpdateError("这个 Release 没有提供 .exe 下载文件")
@@ -154,14 +172,19 @@ def download_update(
     target = folder / (info.asset.name or "CoreNextLauncher-new.exe")
     if target.exists():
         target.unlink(missing_ok=True)
+    algorithm, digest = split_digest(info.asset.digest)
     net.download(
         info.asset.url,
         target,
+        expected_sha1=digest if algorithm == "sha1" else None,
+        expected_sha256=digest if algorithm == "sha256" else None,
         expected_size=info.asset.size or None,
         progress=progress,
         cancel=cancel,
         timeout=180,
     )
+    if not algorithm and notes is not None:
+        notes.append("Release 未提供 sha256/sha1 校验值，更新包仅做了大小校验。")
     return target
 
 

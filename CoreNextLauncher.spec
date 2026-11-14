@@ -1,11 +1,28 @@
 # -*- mode: python ; coding: utf-8 -*-
 
+from pathlib import Path
+
+_root = Path(SPECPATH)
+
+
+def _entries(relative, destination):
+    """Bundle a path only when it exists, so a fresh checkout still builds."""
+    target = _root / relative
+    if not target.exists():
+        return []
+    return [(str(target), destination)]
+
+
+_datas = [("launcher/resources", "launcher/resources")]
+_datas += _entries("tools/easytier", "tools/easytier")
+_datas += _entries("licenses", "licenses")
+_datas += _entries("THIRD_PARTY_NOTICES.md", ".")
 
 a = Analysis(
     ['main.py'],
     pathex=[],
     binaries=[('build/mc_core.exe', 'build')],
-    datas=[('launcher/resources', 'launcher/resources')],
+    datas=_datas,
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},

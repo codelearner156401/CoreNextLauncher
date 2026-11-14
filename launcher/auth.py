@@ -50,7 +50,20 @@ def _request_json(
     try:
         with urllib.request.urlopen(request, timeout=30) as response:
             body = response.read().decode("utf-8", "replace")
-            return response.status, json.loads(body) if body else {}
+            try:
+                payload = json.loads(body) if body else {}
+            except json.JSONDecodeError as exc:
+                # A proxy or captive portal can answer 200 with HTML.
+                raise AuthError(
+                    f"服务器返回了非 JSON 响应（HTTP {response.status}）：{body[:200]}"
+                ) from exc
+            if not isinstance(payload, dict):
+                # Callers read the payload with .get(); an array or bare scalar
+                # here used to escape as AttributeError.
+                raise AuthError(
+                    f"服务器返回了非对象 JSON（HTTP {response.status}）：{str(payload)[:200]}"
+                )
+            return response.status, payload
     except urllib.error.HTTPError as exc:
         body = exc.read().decode("utf-8", "replace")
         try:

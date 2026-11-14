@@ -54,9 +54,12 @@ def _card(title: str, subtitle: str = ""):
 class IsolationDialog(QDialog):
     """Per-version resource isolation toggle dialog."""
 
+    status_changed = Signal(str, str)
+
     def __init__(self, instance: Path, parent=None) -> None:
         super().__init__(parent)
         self.instance = Path(instance)
+        self._busy = False
         self.setWindowTitle("版本隔离")
         self.resize(520, 430)
         layout = QVBoxLayout(self)
@@ -85,14 +88,14 @@ class IsolationDialog(QDialog):
             self.list.addItem("该实例没有可用的 versions 版本")
         buttons = QHBoxLayout()
         buttons.addStretch(1)
-        cancel = QPushButton("取消")
-        cancel.setObjectName("Ghost")
-        cancel.clicked.connect(self.reject)
-        buttons.addWidget(cancel)
-        apply_button = QPushButton("应用")
-        apply_button.setObjectName("Primary")
-        apply_button.clicked.connect(self._apply)
-        buttons.addWidget(apply_button)
+        self.cancel_button = QPushButton("取消")
+        self.cancel_button.setObjectName("Ghost")
+        self.cancel_button.clicked.connect(self.reject)
+        buttons.addWidget(self.cancel_button)
+        self.apply_button = QPushButton("应用")
+        self.apply_button.setObjectName("Primary")
+        self.apply_button.clicked.connect(self._apply)
+        buttons.addWidget(self.apply_button)
         layout.addLayout(buttons)
 
     def _load_versions(self) -> list[str]:
@@ -106,6 +109,8 @@ class IsolationDialog(QDialog):
         return versions
 
     def _apply(self) -> None:
+        if self._busy:
+            return
         if not self._versions:
             self.accept()
             return
@@ -122,38 +127,80 @@ class IsolationDialog(QDialog):
             elif was and not now:
                 changes_disable.append(version)
         if changes_enable:
-            answer = QMessageBox.question(
-                self,
-                "开启版本隔离",
+            box = QMessageBox(self)
+            box.setWindowTitle("开启版本隔离")
+            box.setIcon(QMessageBox.Icon.Question)
+            box.setText(
                 "将为以下版本创建独立资源目录，并把公共 mods / config / saves / resourcepacks 复制进去：\n"
                 + ", ".join(changes_enable)
-                + "\n\n继续吗？",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.Yes,
+                + "\n\n继续吗？"
             )
-            if answer != QMessageBox.StandardButton.Yes:
+            box.setStandardButtons(
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+            )
+            box.setDefaultButton(QMessageBox.StandardButton.Yes)
+            if run_in_window(self, box, "开启版本隔离") != QMessageBox.StandardButton.Yes:
                 return
         if changes_disable:
-            answer = QMessageBox.question(
-                self,
-                "关闭版本隔离",
+            box = QMessageBox(self)
+            box.setWindowTitle("关闭版本隔离")
+            box.setIcon(QMessageBox.Icon.Question)
+            box.setText(
                 "将把隔离目录中的资源合并回实例公共目录，并删除隔离资源文件夹：\n"
                 + ", ".join(changes_disable)
-                + "\n\n请确认不会覆盖重要文件，继续吗？",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.No,
+                + "\n\n请确认不会覆盖重要文件，继续吗？"
             )
-            if answer != QMessageBox.StandardButton.Yes:
+            box.setStandardButtons(
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+            )
+            box.setDefaultButton(QMessageBox.StandardButton.No)
+            if run_in_window(self, box, "关闭版本隔离") != QMessageBox.StandardButton.Yes:
                 return
-        try:
-            for version in changes_enable:
-                isolation.set_isolation(self.instance, version, True, migrate=True)
-            for version in changes_disable:
-                isolation.set_isolation(self.instance, version, False, migrate=True)
-        except (OSError, FileNotFoundError) as exc:
-            QMessageBox.warning(self, "版本隔离失败", str(exc))
-            return
+        self._start_migration(changes_enable, changes_disable)
+
+    def _start_migration(self, enable: list[str], disable: list[str]) -> None:
+        """Migrate the resource folders off the GUI thread - copytree can take minutes."""
+        instance = self.instance
+        self._busy = True
+        self.apply_button.setEnabled(False)
+        self.cancel_button.setEnabled(False)
+        self.status_changed.emit("running", "正在应用版本隔离，正在复制资源…")
+
+        def work(progress, cancelled):
+            for version in enable:
+                isolation.set_isolation(instance, version, True, migrate=True)
+            for version in disable:
+                isolation.set_isolation(instance, version, False, migrate=True)
+            return (tuple(enable), tuple(disable))
+
+        owner = self.parent() if isinstance(self.parent(), QWidget) else self
+        start_task(owner, work, on_done=self._migrated, on_failed=self._migrate_failed)
+
+    def _end_migration(self) -> None:
+        self._busy = False
+        self.apply_button.setEnabled(True)
+        self.cancel_button.setEnabled(True)
+
+    def _migrated(self, result) -> None:
+        self._end_migration()
+        enable, disable = result
+        parts = []
+        if enable:
+            parts.append("已开启：" + "、".join(enable))
+        if disable:
+            parts.append("已关闭：" + "、".join(disable))
+        self.status_changed.emit("success", "版本隔离已更新（" + "；".join(parts) + "）")
         self.accept()
+
+    def _migrate_failed(self, message: str) -> None:
+        self._end_migration()
+        self.status_changed.emit("error", f"版本隔离失败：{message}")
+        QMessageBox.warning(self, "版本隔离失败", message)
+
+    def reject(self) -> None:  # noqa: D401 - keeps the dialog alive while migrating
+        if self._busy:
+            return
+        super().reject()
 
 
 class InstancePage(QWidget):
@@ -409,9 +456,15 @@ class InstancePage(QWidget):
         if info is None:
             return
         dialog = IsolationDialog(info.path, self)
+        dialog.status_changed.connect(self._on_isolation_status)
         if run_in_window(self, dialog, "版本隔离") == QDialog.DialogCode.Accepted:
             self.log_requested.emit("success", f"版本隔离设置已更新：{info.name}")
             self.refresh()
+
+    def _on_isolation_status(self, level: str, message: str) -> None:
+        self.status.setProperty("level", level)
+        self.status.setText(message)
+        self._repolish()
 
     def activate_selected(self) -> None:
         info = self._selected()

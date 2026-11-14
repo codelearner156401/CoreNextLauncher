@@ -20,7 +20,7 @@ import os
 import subprocess
 import threading
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Callable, Iterator
 
 from .paths import app_root, core_path
 
@@ -30,6 +30,38 @@ DEFAULT_EXE = PROJECT_ROOT / "build" / "mc_core.exe"
 
 class CoreError(RuntimeError):
     """Raised when the core cannot be started or reports a fatal failure."""
+
+
+class CoreUnknownCommand(CoreError):
+    """The kernel does not know the requested command.
+
+    The message always contains "未知命令" (or "unknown"), so callers that only
+    inspect the text can retry the work with a pure-Python implementation.
+    """
+
+    def __init__(self, message: str = "", command: str = "") -> None:
+        text = (message or "").strip()
+        if not text:
+            text = f"内核未知命令：{command or 'download-url'}（当前内核版本不支持）"
+        elif not _is_unknown_command(text):
+            text = f"内核未知命令：{command or 'download-url'}（{text}）"
+        super().__init__(text)
+        self.command = command or "download-url"
+
+
+_UNKNOWN_COMMAND_MARKERS = (
+    "未知命令",
+    "unknown command",
+    "unknown_command",
+    "unknown-command",
+    "unsupported command",
+    "不支持的命令",
+)
+
+
+def _is_unknown_command(message: str) -> bool:
+    text = (message or "").lower()
+    return any(marker in text for marker in _UNKNOWN_COMMAND_MARKERS)
 
 
 def _decode_line(line: str) -> dict[str, Any]:
@@ -52,7 +84,9 @@ class CoreClient:
         self.exe_path = Path(exe_path) if exe_path else core_path()
         self.last_returncode: int | None = None
         self.last_stderr: str = ""
-        self._proc: subprocess.Popen[str] | None = None
+        # Only used by kill(): call()/stream() keep their process locally and
+        # register it here so a stop request can reach the running child.
+        self._active_proc: subprocess.Popen[str] | None = None
         self._lock = threading.Lock()
 
     # ------------------------------------------------------------------ info
@@ -86,10 +120,27 @@ class CoreClient:
             creationflags=creationflags,
         )
 
-    def kill(self) -> None:
-        """Terminate the currently running core process, if any."""
+    def clone(self) -> "CoreClient":
+        """Return a client with the same kernel path but its own registration.
+
+        Workers each own a clone so stopping one core command can never
+        terminate the process of another command.
+        """
+        return CoreClient(self.exe_path)
+
+    def _register_process(self, proc: subprocess.Popen[str]) -> None:
         with self._lock:
-            proc = self._proc
+            self._active_proc = proc
+
+    def _release_process(self, proc: subprocess.Popen[str]) -> None:
+        with self._lock:
+            if self._active_proc is proc:
+                self._active_proc = None
+
+    def kill(self) -> None:
+        """Terminate the process this client currently has registered."""
+        with self._lock:
+            proc = self._active_proc
         if proc is not None and proc.poll() is None:
             try:
                 proc.kill()
@@ -106,8 +157,7 @@ class CoreClient:
         """Run a short-lived command and return every event it emitted."""
         self._check_available()
         proc = self._popen(command)
-        with self._lock:
-            self._proc = proc
+        self._register_process(proc)
         try:
             try:
                 stdout, stderr = proc.communicate(
@@ -119,8 +169,7 @@ class CoreClient:
                 proc.communicate()
                 raise CoreError(f"内核命令 {command!r} 执行超时（{timeout:.0f}s）") from None
         finally:
-            with self._lock:
-                self._proc = None
+            self._release_process(proc)
 
         self.last_returncode = proc.returncode
         self.last_stderr = (stderr or "").strip()
@@ -138,8 +187,7 @@ class CoreClient:
         """Yield core events as soon as each output line arrives."""
         self._check_available()
         proc = self._popen(command)
-        with self._lock:
-            self._proc = proc
+        self._register_process(proc)
         self.last_returncode = None
         self.last_stderr = ""
 
@@ -181,8 +229,78 @@ class CoreClient:
             reader.join(timeout=2)
             self.last_returncode = proc.returncode
             self.last_stderr = "".join(stderr_chunks).strip()
-            with self._lock:
-                self._proc = None
+            self._release_process(proc)
+
+    # -------------------------------------------------------------- download
+    def download_url(
+        self,
+        url: str,
+        dest: str | Path,
+        *,
+        sha1: str = "",
+        threads: int = 8,
+        on_event: Callable[[dict[str, Any]], None] | None = None,
+        cancel: Callable[[], bool] | None = None,
+    ) -> dict[str, Any]:
+        """Run the kernel "download-url" command and return its done payload.
+
+        Events are forwarded to *on_event* as they arrive (progress / status /
+        done / error). An error event raises CoreError with the kernel text; a
+        kernel that does not know the command raises CoreUnknownCommand so the
+        caller can switch to the built-in downloader. *cancel* is polled between
+        events, and kill() is called so the child stops downloading immediately.
+        """
+        target = Path(dest)
+        payload: dict[str, Any] = {
+            "url": str(url or ""),
+            "dest": str(target),
+            "sha1": str(sha1 or ""),
+            "threads": int(threads or 1),
+        }
+        done_data: dict[str, Any] | None = None
+        events = self.stream("download-url", payload)
+        try:
+            for event in events:
+                if on_event is not None:
+                    try:
+                        on_event(event)
+                    except Exception:
+                        pass
+                kind = event.get("type")
+                if kind == "error":
+                    message = str(event.get("message") or "").strip()
+                    self.kill()
+                    if _is_unknown_command(message):
+                        raise CoreUnknownCommand(message, "download-url")
+                    raise CoreError(message or "内核下载失败")
+                if kind == "done":
+                    data = event.get("data")
+                    done_data = dict(data) if isinstance(data, dict) else {}
+                if cancel is not None and cancel():
+                    self.kill()
+                    raise CoreError("下载已取消")
+        finally:
+            events.close()
+
+        if cancel is not None and cancel():
+            raise CoreError("下载已取消")
+        if done_data is None:
+            if self.last_returncode not in (0, None):
+                stderr = self.last_stderr.strip()
+                if _is_unknown_command(stderr):
+                    raise CoreUnknownCommand(stderr, "download-url")
+                raise CoreError(stderr or f"内核退出码 {self.last_returncode}")
+            if target.is_file() and target.stat().st_size > 0:
+                return {"path": str(target), "size": target.stat().st_size}
+            raise CoreUnknownCommand("", "download-url")
+
+        produced = Path(str(done_data.get("path") or "").strip() or str(target))
+        if not produced.is_file() or produced.stat().st_size <= 0:
+            # 内核回了 done 却没有真正写盘: 旧版内核不认识该命令时的表现。
+            raise CoreUnknownCommand(f"完成事件未产生文件（{produced}）", "download-url")
+        done_data.setdefault("path", str(produced))
+        done_data.setdefault("size", produced.stat().st_size)
+        return done_data
 
     # -------------------------------------------------------------- helpers
     def scan(self, mc_dir: str | Path) -> list[dict[str, Any]]:

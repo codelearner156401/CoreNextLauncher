@@ -37,6 +37,7 @@ class FabricInstall:
     loader_version: str
     libraries: int = 0
     skipped: int = 0
+    failed: int = 0
 
 
 @dataclass
@@ -102,42 +103,75 @@ def installed_profile(versions_dir: str | Path, mc_version: str) -> str:
     return best
 
 
+def _int_or_zero(value: object) -> int:
+    try:
+        return int(value or 0)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return 0
+
+
+def _library_ok(path: Path, sha1: str, size: int) -> bool:
+    """Is the file already on disk the one the profile describes?
+
+    Compares the published sha1 when the profile has one and falls back to the
+    declared size otherwise, so a truncated or stale jar is re-downloaded.
+    """
+    try:
+        if size and path.stat().st_size != size:
+            return False
+    except OSError:
+        return False
+    if not sha1:
+        return True
+    try:
+        return net.file_sha1(path).lower() == sha1.lower()
+    except OSError:
+        return False
+
+
 def _download_libraries(
     profile: dict,
     game_dir: Path,
     progress: StageCallback | None,
     cancel: CancelCallback | None,
-) -> tuple[int, int]:
+) -> tuple[int, int, int]:
     libraries = profile.get("libraries") or []
     downloaded = 0
     skipped = 0
+    failed = 0
     total = len(libraries)
     for index, library in enumerate(libraries):
         if cancel is not None and cancel():
             raise FabricError("已取消 Fabric 安装")
         if not isinstance(library, dict):
+            failed += 1
             continue
         name = str(library.get("name") or "")
         base_url = str(library.get("url") or "")
         relative = maven_path(name)
         if not relative:
+            failed += 1
             continue
         dest = game_dir / "libraries" / relative
-        if dest.is_file() and dest.stat().st_size > 0:
+        expected_sha1 = str(library.get("sha1") or "").strip()
+        expected_size = _int_or_zero(library.get("size"))
+        if dest.is_file() and dest.stat().st_size > 0 and _library_ok(dest, expected_sha1, expected_size):
             skipped += 1
             continue
         if not base_url:
+            # No maven URL: the library comes from the vanilla download chain.
+            skipped += 1
             continue
         if progress is not None:
             progress(f"下载 Fabric 依赖：{Path(relative).name}", index, total)
         net.download(
             base_url.rstrip("/") + "/" + relative,
             dest,
-            expected_sha1=str(library.get("sha1") or "") or None,
-            expected_size=int(library.get("size") or 0) or None,
+            expected_sha1=expected_sha1 or None,
+            expected_size=expected_size or None,
         )
         downloaded += 1
-    return downloaded, skipped
+    return downloaded, skipped, failed
 
 
 def install_fabric(
@@ -173,13 +207,14 @@ def install_fabric(
 
     if progress is not None:
         progress("正在下载 Fabric 依赖库…", 0, len(profile.get("libraries") or []))
-    downloaded, skipped = _download_libraries(profile, game, progress, cancel)
+    downloaded, skipped, failed = _download_libraries(profile, game, progress, cancel)
     return FabricInstall(
         profile_id=profile_id,
         profile_path=profile_path,
         loader_version=loader,
         libraries=downloaded,
         skipped=skipped,
+        failed=failed,
     )
 
 

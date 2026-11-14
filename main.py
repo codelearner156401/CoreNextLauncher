@@ -23,7 +23,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import QApplication
 
-from launcher import APP_NAME
+from launcher import APP_NAME, anim
 from launcher.config import load_config
 from launcher.core_client import CoreClient
 from launcher.main_window import MainWindow
@@ -81,6 +81,10 @@ def main(argv: list[str] | None = None) -> int:
         str(profile.get("accent") or "#7b5cff"),
     )
     app.setWindowIcon(make_app_icon())
+    # The startup scene obeys the same global switch and speed as every other
+    # scene, so the persisted settings are applied before the splash exists.
+    anim.set_speed(getattr(config, "animation_speed", 1.0))
+    anim.set_loading_enabled(getattr(config, "loading_animation", True))
 
     splash = create_splash(config)
     if splash is not None:

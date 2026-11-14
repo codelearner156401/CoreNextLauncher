@@ -3,10 +3,20 @@
 from __future__ import annotations
 
 import ctypes
+import json
 import os
+import sys
 from pathlib import Path
 
-from PySide6.QtCore import QSize, QTimer, Qt, QUrl, Signal
+from PySide6.QtCore import (
+    QAbstractListModel,
+    QModelIndex,
+    QSize,
+    QTimer,
+    Qt,
+    QUrl,
+    Signal,
+)
 from PySide6.QtGui import QColor, QDesktopServices, QLinearGradient, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -20,14 +30,17 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QListView,
     QListWidget,
     QListWidgetItem,
     QMessageBox,
     QPushButton,
     QScrollArea,
+    QSizePolicy,
     QSlider,
     QSpinBox,
     QStackedWidget,
+    QTabWidget,
     QToolButton,
     QVBoxLayout,
     QWidget,
@@ -38,10 +51,13 @@ from ..constants import APP_NAME, APP_VERSION
 from ..dev_state import DeveloperState
 from ..services import ai_diag
 from ..services import catalog
+from ..services import fabric_install
 from ..services import java_scan
 from ..services import jvm
+from ..services import net
 from .tasks import start_task
 from .dialog_page import run_in_window
+from .loading_overlay import LoadingOverlay
 from .version_card import VersionCardDelegate
 from .widgets import (
     TYPE_LABELS,
@@ -50,6 +66,57 @@ from .widgets import (
     LogView,
     ShimmerProgressBar,
 )
+
+try:  # launcher/config.py is owned elsewhere: degrade instead of failing to import.
+    from .. import config as _config_module
+except ImportError:  # pragma: no cover - config.py always ships
+    _config_module = None
+
+_NORMALIZE_DIRECTORY = (
+    getattr(_config_module, "normalize_directory", None) if _config_module else None
+)
+
+# Fabric keeps the maven host on each entry's url; this is only the fallback for
+# libraries whose JSON carries neither an artifact nor a url of its own.
+FABRIC_MAVEN = "https://maven.fabricmc.net/"
+ASSET_RESOURCE_BASE = "https://resources.download.minecraft.net"
+INHERIT_MAX_DEPTH = 5
+FULL_HASH_LIMIT = 64 * 1024 * 1024
+
+
+def _normalize_directory(value: str) -> str:
+    """Absolute directory from *value*, or "" when it cannot be one."""
+    if _NORMALIZE_DIRECTORY is not None:
+        try:
+            return str(_NORMALIZE_DIRECTORY(value) or "")
+        except (OSError, TypeError, ValueError):
+            return ""
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    try:
+        candidate = Path(os.path.expanduser(text))
+        return str(candidate.resolve()) if candidate.is_absolute() else ""
+    except OSError:
+        return ""
+
+
+def _normalize_image_path(value: str) -> str:
+    """expanduser + resolve, keeping the real absolute drive (D:/, E:/ …)."""
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    try:
+        return str(Path(text).expanduser().resolve())
+    except OSError:
+        return text
+
+
+def _int_or_zero(value: object) -> int:
+    try:
+        return int(value or 0)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return 0
 
 
 def _card(title: str | None = None, subtitle: str | None = None) -> tuple[HoverCard, QVBoxLayout]:
@@ -74,6 +141,21 @@ def _field(text: str) -> QLabel:
     label = QLabel(text)
     label.setObjectName("FieldLabel")
     return label
+
+
+def _tab_scroll(widget: QWidget, name: str, min_height: int) -> QScrollArea:
+    """Wrap one tab card in its own scroll area (one per tab, never nested)."""
+    area = QScrollArea()
+    area.setObjectName(name)
+    area.setWidgetResizable(True)
+    area.setFrameShape(QFrame.Shape.NoFrame)
+    area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+    area.setMinimumHeight(min_height)
+    # The card has to grow with the viewport; at its default Preferred policy
+    # the scroll area keeps it at the size hint and leaves a blank strip below.
+    widget.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding)
+    area.setWidget(widget)
+    return area
 
 
 def _repolish(widget: QWidget) -> None:
@@ -168,7 +250,11 @@ class SettingsPage(QWidget):
     developer_state_changed = Signal()
     appearance_changed = Signal()
     animation_speed_changed = Signal(float)
+    debug_action = Signal(str, str)
+    skin_requested = Signal()
+    multiplayer_requested = Signal()
     check_update_requested = Signal()
+    log_requested = Signal(str, str)
 
     def __init__(self, config, parent=None) -> None:
         super().__init__(parent)
@@ -185,6 +271,12 @@ class SettingsPage(QWidget):
         self._primary_color = "#4f8cff"
         self._accent_color = "#7b5cff"
         self._memory_adjusted = False
+        # Decoding a wallpaper costs far more than the blur/dim tick, so both the
+        # decoded image and the cropped preview are cached by (path, mtime).
+        self._image_cache: dict[tuple, QPixmap] = {}
+        self._preview_cache: dict[tuple, QPixmap] = {}
+        self._image_stats = {"decode": 0, "scale": 0}
+        self._warned_game_dir = ""
         self._build()
         self.apply_config(config)
         QTimer.singleShot(300, lambda: self.scan_java(silent=True))
@@ -242,7 +334,20 @@ class SettingsPage(QWidget):
         self.version_label.setObjectName("VersionLabel")
         self.version_label.setToolTip("连续点击 7 次解锁开发者选项")
         self.version_label.clicked.connect(self._on_version_clicked)
-        footer.addWidget(self.version_label)
+        version_column = QVBoxLayout()
+        version_column.setContentsMargins(0, 0, 0, 0)
+        version_column.setSpacing(2)
+        version_column.addWidget(self.version_label)
+        self.third_party_label = QLabel()
+        self.third_party_label.setObjectName("Hint")
+        self.third_party_label.setTextFormat(Qt.TextFormat.RichText)
+        self.third_party_label.setText(
+            '<a href="third-party">Powered by PySide6 (LGPLv3) &amp; EasyTier (Apache-2.0)</a>'
+        )
+        self.third_party_label.setOpenExternalLinks(False)
+        self.third_party_label.linkActivated.connect(self._open_third_party_notices)
+        version_column.addWidget(self.third_party_label)
+        footer.addLayout(version_column)
         self.dev_hint = QLabel("")
         self.dev_hint.setObjectName("Hint")
         self.dev_hint.setVisible(False)
@@ -835,6 +940,19 @@ class SettingsPage(QWidget):
         splash_row.addLayout(splash_text, 1)
         layout.addLayout(splash_row)
 
+        skin_row = QHBoxLayout()
+        skin_row.setSpacing(8)
+        self.skin_button = QPushButton("皮肤预览")
+        self.skin_button.setObjectName("Ghost")
+        self.skin_button.setToolTip("打开皮肤管理页面，查看 2D 纸娃娃皮肤预览")
+        self.skin_button.clicked.connect(self.skin_requested.emit)
+        skin_row.addWidget(self.skin_button)
+        skin_hint = QLabel("随时打开皮肤管理，切换 Steve / Alex 与本地皮肤")
+        skin_hint.setObjectName("Hint")
+        skin_row.addWidget(skin_hint)
+        skin_row.addStretch(1)
+        layout.addLayout(skin_row)
+
         note = QLabel(
             "无自定义背景时默认开启系统级背景模糊；上传背景图后可自行选择是否保留模糊。"
             "所有主题参数按风格独立保存，关闭程序后仍会保留。"
@@ -952,8 +1070,8 @@ class SettingsPage(QWidget):
             self.dim_slider.blockSignals(True)
             self.dim_slider.setValue(int(profile.get("dim", 42) or 0))
             self.dim_slider.blockSignals(False)
-            self._background_path = str(profile.get("background") or "")
-            self._splash_path = str(profile.get("splash") or "")
+            self._background_path = _normalize_image_path(str(profile.get("background") or ""))
+            self._splash_path = _normalize_image_path(str(profile.get("splash") or ""))
             self._update_background_preview()
             self._update_splash_preview()
             self._sync_appearance_widgets()
@@ -1060,7 +1178,11 @@ class SettingsPage(QWidget):
         )
         if not chosen:
             return
-        probe = QPixmap(chosen)
+        # Keep the real absolute path (D:/, E:/ ...); never let a path be
+        # rebased against the C: working directory.
+        path = _normalize_image_path(chosen)
+        # Probe through the cache: the preview below then reuses this decode (U-03).
+        probe = self._decode_image(path)
         if probe.isNull():
             QMessageBox.warning(
                 self,
@@ -1068,7 +1190,7 @@ class SettingsPage(QWidget):
                 "这个文件不是受支持的图片，或文件已经损坏。\n支持 JPG / PNG / WebP / BMP / GIF。",
             )
             return
-        self._background_path = chosen
+        self._background_path = path
         self._update_background_preview()
         if not self.glass_check.isChecked() and not self.system_blur_check.isChecked():
             answer = QMessageBox.question(
@@ -1094,21 +1216,76 @@ class SettingsPage(QWidget):
         if not self._loading_settings:
             self.appearance_changed.emit()
 
+    def _image_mtime(self, path: str) -> int:
+        try:
+            return int(os.stat(path).st_mtime_ns)
+        except OSError:
+            return 0
+
+    def _decode_image(self, path: str) -> QPixmap:
+        """Decode *path* once per (path, mtime); every preview reuses it."""
+        if not path:
+            return QPixmap()
+        key = (path, self._image_mtime(path))
+        cached = self._image_cache.get(key)
+        if cached is not None:
+            return cached
+        pixmap = QPixmap(path)
+        self._image_stats["decode"] += 1
+        if len(self._image_cache) >= 8:
+            self._image_cache.clear()
+        self._image_cache[key] = pixmap
+        return pixmap
+
+    @staticmethod
+    def _device_size(label: QLabel) -> tuple[QSize, float]:
+        """Label size in device pixels plus the ratio that produced it."""
+        size = label.size()
+        ratio = float(label.devicePixelRatioF()) or 1.0
+        return (
+            QSize(
+                max(1, int(round(size.width() * ratio))),
+                max(1, int(round(size.height() * ratio))),
+            ),
+            ratio,
+        )
+
+    def _preview_pixmap(self, path: str, label: QLabel) -> QPixmap:
+        """Centre-cropped preview rendered at the label's device pixel size.
+
+        Scaling to logical pixels and letting Qt upscale the result made every
+        preview soft on a 2x display (R-06), so the pixmap is built at
+        size * devicePixelRatio and tagged with that ratio.
+        """
+        target, ratio = self._device_size(label)
+        source = self._decode_image(path)
+        if source.isNull():
+            return QPixmap()
+        key = (path, self._image_mtime(path), target.width(), target.height())
+        cached = self._preview_cache.get(key)
+        if cached is not None:
+            return cached
+        scaled = source.scaled(
+            target,
+            Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+        x = max(0, (scaled.width() - target.width()) // 2)
+        y = max(0, (scaled.height() - target.height()) // 2)
+        preview = scaled.copy(x, y, target.width(), target.height())
+        preview.setDevicePixelRatio(ratio)
+        self._image_stats["scale"] += 1
+        if len(self._preview_cache) >= 8:
+            self._preview_cache.clear()
+        self._preview_cache[key] = preview
+        return preview
+
     def _update_background_preview(self) -> None:
-        size = self.background_preview.size()
         path = self._background_path
-        pixmap = QPixmap(path) if path else QPixmap()
-        if not pixmap.isNull():
-            scaled = pixmap.scaled(
-                size,
-                Qt.AspectRatioMode.KeepAspectRatioByExpanding,
-                Qt.TransformationMode.SmoothTransformation,
-            )
-            x = max(0, (scaled.width() - size.width()) // 2)
-            y = max(0, (scaled.height() - size.height()) // 2)
-            self.background_preview.setPixmap(
-                scaled.copy(x, y, size.width(), size.height())
-            )
+        pixmap = self._decode_image(path) if path else QPixmap()
+        preview = self._preview_pixmap(path, self.background_preview)
+        if not pixmap.isNull() and not preview.isNull():
+            self.background_preview.setPixmap(preview)
             self.background_label.setText(Path(path).name)
             self.background_label.setToolTip(path)
             self.background_meta.setText(
@@ -1118,11 +1295,15 @@ class SettingsPage(QWidget):
             return
 
         dark = theme.current_theme() != "light"
-        thumb = QPixmap(size)
+        target, ratio = self._device_size(self.background_preview)
+        rect = self.background_preview.rect()
+        thumb = QPixmap(target)
         thumb.fill(Qt.GlobalColor.transparent)
+        thumb.setDevicePixelRatio(ratio)
         painter = QPainter(thumb)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-        gradient = QLinearGradient(0, 0, size.width(), size.height())
+        painter.scale(ratio, ratio)
+        gradient = QLinearGradient(0, 0, rect.width(), rect.height())
         if dark:
             gradient.setColorAt(0.0, QColor("#12203c"))
             gradient.setColorAt(1.0, QColor("#2a1745"))
@@ -1131,12 +1312,12 @@ class SettingsPage(QWidget):
             gradient.setColorAt(0.0, QColor("#dce7ff"))
             gradient.setColorAt(1.0, QColor("#f3e8ff"))
             text_colour = QColor(51, 65, 85, 190)
-        painter.fillRect(thumb.rect(), gradient)
+        painter.fillRect(rect, gradient)
         painter.setPen(QPen(text_colour))
         font = painter.font()
         font.setPointSize(9)
         painter.setFont(font)
-        painter.drawText(thumb.rect(), Qt.AlignmentFlag.AlignCenter, "内置氛围背景")
+        painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, "内置氛围背景")
         painter.end()
         self.background_preview.setPixmap(thumb)
         self.background_label.setText("内置氛围背景")
@@ -1154,10 +1335,11 @@ class SettingsPage(QWidget):
         )
         if not chosen:
             return
-        if QPixmap(chosen).isNull():
+        path = _normalize_image_path(chosen)
+        if self._decode_image(path).isNull():
             QMessageBox.warning(self, "无法读取图片", "这个文件不是受支持的图片。")
             return
-        self._splash_path = chosen
+        self._splash_path = path
         self._update_splash_preview()
         self._save_profile()
         if not self._loading_settings:
@@ -1171,35 +1353,31 @@ class SettingsPage(QWidget):
             self.appearance_changed.emit()
 
     def _update_splash_preview(self) -> None:
-        size = self.splash_preview.size()
         path = self._splash_path
-        pixmap = QPixmap(path) if path else QPixmap()
-        if not pixmap.isNull():
-            scaled = pixmap.scaled(
-                size,
-                Qt.AspectRatioMode.KeepAspectRatioByExpanding,
-                Qt.TransformationMode.SmoothTransformation,
-            )
-            x = max(0, (scaled.width() - size.width()) // 2)
-            y = max(0, (scaled.height() - size.height()) // 2)
-            self.splash_preview.setPixmap(scaled.copy(x, y, size.width(), size.height()))
+        preview = self._preview_pixmap(path, self.splash_preview)
+        if not preview.isNull():
+            self.splash_preview.setPixmap(preview)
             self.splash_label.setText(Path(path).name)
             self.splash_clear.setEnabled(True)
             return
-        thumb = QPixmap(size)
+        target, ratio = self._device_size(self.splash_preview)
+        rect = self.splash_preview.rect()
+        thumb = QPixmap(target)
         thumb.fill(Qt.GlobalColor.transparent)
+        thumb.setDevicePixelRatio(ratio)
         painter = QPainter(thumb)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-        gradient = QLinearGradient(0, 0, size.width(), size.height())
+        painter.scale(ratio, ratio)
+        gradient = QLinearGradient(0, 0, rect.width(), rect.height())
         gradient.setColorAt(0.0, QColor(self._primary_color))
         gradient.setColorAt(1.0, QColor(self._accent_color))
-        painter.fillRect(thumb.rect(), gradient)
+        painter.fillRect(rect, gradient)
         painter.setPen(QColor("#ffffff"))
         font = painter.font()
         font.setPointSize(18)
         font.setBold(True)
         painter.setFont(font)
-        painter.drawText(thumb.rect(), Qt.AlignmentFlag.AlignCenter, "C")
+        painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, "C")
         painter.end()
         self.splash_preview.setPixmap(thumb)
         self.splash_label.setText("默认加载动画")
@@ -1390,6 +1568,81 @@ class SettingsPage(QWidget):
         speed_hint.setWordWrap(True)
         panel.addWidget(speed_hint)
 
+        self.cached_login_check = QCheckBox(
+            "断网时允许使用 30 天本地登录缓存（默认关闭，仅本次运行有效）"
+        )
+        self.cached_login_check.setChecked(False)
+        self.cached_login_check.setToolTip(
+            "关闭时，正版服务器不可达将无法启动；开启后才允许读取本地加密凭证。"
+        )
+        panel.addWidget(self.cached_login_check)
+        cached_hint = QLabel(
+            "安全提示：缓存登录仅用于断网单人调试；联网后仍会优先校验正版。"
+        )
+        cached_hint.setObjectName("Hint")
+        cached_hint.setWordWrap(True)
+        panel.addWidget(cached_hint)
+
+        debug_title = QLabel("调试面板 · 仅开发调试用途，非普通用户功能")
+        debug_title.setObjectName("SectionTitle")
+        panel.addWidget(debug_title)
+        debug_row = QHBoxLayout()
+        debug_row.setSpacing(8)
+        self.debug_all_button = QPushButton("一键模拟全部报错")
+        self.debug_all_button.setObjectName("DangerGhost")
+        self.debug_all_button.clicked.connect(lambda: self.debug_action.emit("all", ""))
+        debug_row.addWidget(self.debug_all_button)
+        self.debug_scenario = QComboBox()
+        for key, label in (
+            ("version_scan", "版本扫描失败"),
+            ("config", "配置损坏"),
+            ("java", "Java 缺失"),
+            ("download", "下载校验失败"),
+            ("mod", "Mod 前置缺失"),
+            ("skin", "皮肤文件损坏"),
+            ("update", "在线更新失败"),
+            ("terracotta_create", "联机房间创建失败"),
+            ("terracotta_join", "联机加入失败"),
+        ):
+            self.debug_scenario.addItem(label, key)
+        debug_row.addWidget(self.debug_scenario)
+        self.debug_single_button = QPushButton("单项模拟")
+        self.debug_single_button.setObjectName("Ghost")
+        self.debug_single_button.clicked.connect(
+            lambda: self.debug_action.emit("single", str(self.debug_scenario.currentData() or ""))
+        )
+        debug_row.addWidget(self.debug_single_button)
+        panel.addLayout(debug_row)
+        debug_row2 = QHBoxLayout()
+        debug_row2.setSpacing(8)
+        for text, action in (
+            ("重置调试状态", "reset"),
+            ("导出调试日志", "export"),
+            ("动画预览", "preview"),
+            ("模拟缓存过期", "cache_expiry"),
+        ):
+            button = QPushButton(text)
+            button.setObjectName("Ghost")
+            button.clicked.connect(lambda _checked=False, a=action: self.debug_action.emit(a, ""))
+            debug_row2.addWidget(button)
+        debug_row2.addStretch(1)
+        panel.addLayout(debug_row2)
+        self.dev_skin_button = QPushButton("皮肤管理（开发调试）")
+        self.dev_skin_button.setObjectName("Ghost")
+        self.dev_skin_button.clicked.connect(self.skin_requested.emit)
+        panel.addWidget(self.dev_skin_button)
+        self.dev_multiplayer_button = QPushButton("联机（EasyTier）")
+        self.dev_multiplayer_button.setObjectName("Ghost")
+        self.dev_multiplayer_button.clicked.connect(
+            self.multiplayer_requested.emit
+        )
+        panel.addWidget(self.dev_multiplayer_button)
+
+        self.debug_status = QLabel("等待模拟…（仅开发调试用途）")
+        self.debug_status.setObjectName("Hint")
+        self.debug_status.setWordWrap(True)
+        panel.addWidget(self.debug_status)
+
         self.offline_check = QCheckBox("启用离线模式（不进行正版登录）")
         self.offline_check.setChecked(False)
         self.offline_check.toggled.connect(self._on_offline_toggled)
@@ -1401,6 +1654,12 @@ class SettingsPage(QWidget):
         warning.setObjectName("Hint")
         warning.setWordWrap(True)
         panel.addWidget(warning)
+        self.dev_panel.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum
+        )
+        card.setSizePolicy(
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum
+        )
         self.dev_panel.hide()
         layout.addWidget(self.dev_panel)
         return card
@@ -1432,6 +1691,13 @@ class SettingsPage(QWidget):
         else:
             self._unlock_developer()
 
+    def _open_third_party_notices(self, _link: str = "") -> None:
+        notice = Path(__file__).resolve().parents[2] / "THIRD_PARTY_NOTICES.md"
+        if not notice.is_file():
+            self.log_requested.emit("warn", f"未找到第三方许可说明文件：{notice}")
+            return
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(notice)))
+
     def _unlock_developer(self) -> None:
         self._dev_unlocked = True
         self.dev_hint.setVisible(True)
@@ -1456,6 +1722,12 @@ class SettingsPage(QWidget):
             self.dev_toggle.setArrowType(Qt.ArrowType.RightArrow)
             self.dev_hint.hide()
             self.dev_hint.setText("")
+
+    def cached_login_enabled(self) -> bool:
+        """Session-only developer switch; default off on every launch."""
+        if not self._dev_unlocked:
+            return False
+        return bool(getattr(self, "cached_login_check", None) and self.cached_login_check.isChecked())
 
     def developer_state(self) -> DeveloperState:
         """Current session-only developer/offline switches."""
@@ -1559,6 +1831,11 @@ class SettingsPage(QWidget):
         self.dev_toggle.setArrowType(
             Qt.ArrowType.DownArrow if checked else Qt.ArrowType.RightArrow
         )
+        if checked:
+            self.dev_panel.adjustSize()
+            self.dev_card.adjustSize()
+            QTimer.singleShot(0, self.dev_card.adjustSize)
+            QTimer.singleShot(0, lambda: self.scroll.widget().adjustSize())
 
     def _on_offline_toggled(self, checked: bool) -> None:
         if self._loading_settings:
@@ -1620,7 +1897,7 @@ class SettingsPage(QWidget):
         self._save_profile()
         active = self._profile()
         return {
-            "game_dir": self.game_dir_edit.text().strip(),
+            "game_dir": self._game_directory(),
             "java_path": self.java_path(),
             "max_mem": max_mem,
             "min_mem": min_mem,
@@ -1644,6 +1921,23 @@ class SettingsPage(QWidget):
             "jvm_preset": self.jvm_preset_combo.currentData() or "auto",
             "jvm_args": self._effective_jvm_args(),
         }
+
+    def _game_directory(self) -> str:
+        """Absolute game dir; an unusable path is warned about, never dropped."""
+        raw = self.game_dir_edit.text().strip()
+        if not raw:
+            return ""
+        normalized = _normalize_directory(raw)
+        if normalized:
+            return normalized
+        if raw != self._warned_game_dir:
+            self._warned_game_dir = raw
+            self.flash_saved("游戏目录需要绝对路径，已保留原值")
+            self.game_dir_edit.setToolTip(
+                f"无法解析为绝对路径：{raw}\n请填写例如 D:/Minecraft 或 C:/Users/<你>/AppData/Roaming/.minecraft"
+            )
+            self.game_dir_edit.setText(raw)
+        return raw
 
     def memory_adjusted(self) -> bool:
         return self._memory_adjusted
@@ -1716,6 +2010,412 @@ class SettingsPage(QWidget):
             self.kernel_path.setText(f"{path}\n请先编译 mc_core.exe，然后点击“重新检测”。")
 
 
+def _os_key() -> str:
+    return {"win32": "windows", "darwin": "osx"}.get(sys.platform, "linux")
+
+
+def _file_ok(path: Path, size: int = 0, sha1: str = "") -> bool:
+    """Is path the complete file its metadata describes?
+
+    A zero-byte or truncated jar is never "present"; the sha1 is only compared up
+    to FULL_HASH_LIMIT so a repair cannot end up hashing gigabytes of libraries.
+    """
+    try:
+        actual = path.stat().st_size
+    except OSError:
+        return False
+    if actual <= 0:
+        return False
+    if size and actual != size:
+        return False
+    if sha1 and actual <= FULL_HASH_LIMIT:
+        try:
+            return net.file_sha1(path).lower() == sha1.lower()
+        except OSError:
+            return False
+    return True
+
+
+def _sha1_skipped(size: int, sha1: str) -> bool:
+    """True when a declared sha1 was skipped because the file is very large."""
+    return bool(sha1) and size > FULL_HASH_LIMIT
+
+
+def _library_files(libraries) -> list[dict]:
+    """Resolve library entries to the files they stand for under libraries/.
+
+    Fabric-style entries only carry name/url, so the Maven path is derived from
+    the coordinates; natives entries also contribute their classifier file.  The
+    checks panel and the repair plan share this resolver, so both always agree
+    with what actually lands in libraries/.
+    """
+    files: list[dict] = []
+    seen: set[str] = set()
+    os_name = _os_key()
+    for library in libraries or []:
+        if not isinstance(library, dict):
+            continue
+        name = str(library.get("name") or "")
+        downloads = library.get("downloads") if isinstance(library.get("downloads"), dict) else {}
+        artifact = downloads.get("artifact") if isinstance(downloads.get("artifact"), dict) else {}
+        candidates: list[tuple[str, int, str, str]] = []
+        if artifact.get("path"):
+            candidates.append(
+                (
+                    str(artifact["path"]),
+                    _int_or_zero(artifact.get("size")),
+                    str(artifact.get("sha1") or ""),
+                    str(artifact.get("url") or ""),
+                )
+            )
+        natives = library.get("natives") if isinstance(library.get("natives"), dict) else {}
+        classifier = str(natives.get(os_name) or "").replace("${arch}", "64")
+        if classifier:
+            classifiers = (
+                downloads.get("classifiers")
+                if isinstance(downloads.get("classifiers"), dict)
+                else {}
+            )
+            entry = (
+                classifiers.get(classifier)
+                if isinstance(classifiers.get(classifier), dict)
+                else {}
+            )
+            rel = str(entry.get("path") or "") or fabric_install.maven_path(
+                f"{name}:{classifier}"
+            )
+            if rel:
+                candidates.append(
+                    (
+                        rel,
+                        _int_or_zero(entry.get("size")),
+                        str(entry.get("sha1") or ""),
+                        str(entry.get("url") or ""),
+                    )
+                )
+        if not candidates and name:
+            rel = fabric_install.maven_path(name)
+            if rel:
+                candidates.append((rel, 0, "", ""))
+        for rel, size, sha1, url in candidates:
+            if rel in seen:
+                continue
+            seen.add(rel)
+            files.append(
+                {
+                    "rel": rel,
+                    "size": size,
+                    "sha1": sha1,
+                    "url": url,
+                    "base": str(library.get("url") or ""),
+                }
+            )
+    return files
+
+
+def _read_version_json(versions_dir: Path, version_id: str) -> dict:
+    path = versions_dir / version_id / f"{version_id}.json"
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except OSError as exc:
+        raise FileNotFoundError(f"缺少版本 JSON：{path}") from exc
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"版本 JSON 无法解析：{path}") from exc
+    if not isinstance(raw, dict):
+        raise ValueError(f"版本 JSON 结构异常：{path}")
+    return raw
+
+
+def _version_chain(versions_dir: Path, version_id: str, own_raw: dict | None = None) -> list[dict]:
+    """[child, parent, …] version JSONs, child first, at most INHERIT_MAX_DEPTH parents."""
+    chain: list[dict] = []
+    seen: set[str] = set()
+    current = version_id
+    while current and current not in seen and len(chain) <= INHERIT_MAX_DEPTH:
+        seen.add(current)
+        raw = own_raw if (not chain and own_raw) else _read_version_json(versions_dir, current)
+        raw = dict(raw)
+        raw.setdefault("id", current)
+        chain.append(raw)
+        current = str(raw.get("inheritsFrom") or "")
+    return chain
+
+
+def _merge_chain(chain: list[dict]) -> dict:
+    """Child-wins merge of the chain; libraries keep child-to-parent order."""
+    merged: dict = {}
+    libraries: list = []
+    seen_libs: set[str] = set()
+    for raw in chain:
+        for library in raw.get("libraries") or []:
+            if not isinstance(library, dict):
+                continue
+            key = str(library.get("name") or json.dumps(library, sort_keys=True))
+            if key in seen_libs:
+                continue
+            seen_libs.add(key)
+            libraries.append(library)
+        for key, value in raw.items():
+            if key in ("id", "inheritsFrom", "libraries"):
+                continue
+            if key not in merged and value:
+                merged[key] = value
+    merged["libraries"] = libraries
+    return merged
+
+
+def _asset_targets(mc_dir: Path, index_file: Path) -> list[dict]:
+    """Asset objects declared by an asset index already on disk."""
+    try:
+        data = json.loads(index_file.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    objects = data.get("objects") if isinstance(data, dict) else None
+    if not isinstance(objects, dict):
+        return []
+    targets: list[dict] = []
+    for entry in objects.values():
+        if not isinstance(entry, dict):
+            continue
+        digest = str(entry.get("hash") or "")
+        if len(digest) < 2:
+            continue
+        targets.append(
+            {
+                "dest": mc_dir / "assets" / "objects" / digest[:2] / digest,
+                "url": f"{ASSET_RESOURCE_BASE}/{digest[:2]}/{digest}",
+                "size": _int_or_zero(entry.get("size")),
+                "sha1": digest,
+                "label": f"assets/{digest[:2]}/{digest}",
+            }
+        )
+    return targets
+
+
+def _repair_targets(mc_dir: Path, versions_dir: Path, chain: list[dict]) -> tuple[list[dict], Path]:
+    """Every file a complete install needs, plus the asset index path."""
+    targets: list[dict] = []
+    for raw in chain:
+        downloads = raw.get("downloads") if isinstance(raw.get("downloads"), dict) else {}
+        client = downloads.get("client") if isinstance(downloads.get("client"), dict) else {}
+        url = str(client.get("url") or "")
+        if not url:
+            continue
+        owner = str(raw.get("id") or "")
+        targets.append(
+            {
+                "dest": versions_dir / owner / f"{owner}.jar",
+                "url": url,
+                "size": _int_or_zero(client.get("size")),
+                "sha1": str(client.get("sha1") or ""),
+                "label": f"versions/{owner}/{owner}.jar",
+            }
+        )
+        break
+
+    merged = _merge_chain(chain)
+    index = merged.get("assetIndex") if isinstance(merged.get("assetIndex"), dict) else {}
+    index_id = str(index.get("id") or "")
+    index_file = mc_dir / "assets" / "indexes" / f"{index_id}.json"
+    if index_id and index.get("url"):
+        targets.append(
+            {
+                "dest": index_file,
+                "url": str(index["url"]),
+                "size": _int_or_zero(index.get("size")),
+                "sha1": str(index.get("sha1") or ""),
+                "label": f"assets/indexes/{index_id}.json",
+            }
+        )
+    for item in _library_files(merged.get("libraries") or []):
+        url = item["url"]
+        if not url and item["base"]:
+            url = item["base"].rstrip("/") + "/" + item["rel"]
+        if not url:
+            url = FABRIC_MAVEN + item["rel"]
+        targets.append(
+            {
+                "dest": mc_dir / "libraries" / item["rel"],
+                "url": url,
+                "size": item["size"],
+                "sha1": item["sha1"],
+                "label": f"libraries/{item['rel']}",
+            }
+        )
+    return targets, index_file
+
+
+def _repair_local_files(
+    mc_dir: Path,
+    versions_dir: Path,
+    version_id: str,
+    own_raw: dict | None,
+    progress,
+    cancel,
+) -> dict:
+    """Fetch whatever a (possibly inherited) version is missing, locally.
+
+    The kernel only installs ids from the Mojang manifest and refuses profiles
+    with inheritsFrom, so Fabric-style profiles are completed here: the child and
+    every parent JSON are merged and the missing files are downloaded one by one,
+    skipping anything already valid on disk.
+    """
+    chain = _version_chain(versions_dir, version_id, own_raw)
+    targets, index_file = _repair_targets(mc_dir, versions_dir, chain)
+    downloaded = 0
+    skipped = 0
+    failed = 0
+    notes: list[str] = []
+    assets_expanded = False
+
+    def expand_assets() -> None:
+        nonlocal assets_expanded
+        if assets_expanded:
+            return
+        assets_expanded = True
+        targets.extend(_asset_targets(mc_dir, index_file))
+
+    if index_file.is_file():
+        expand_assets()
+
+    processed = 0
+    while targets:
+        task = targets.pop(0)
+        processed += 1
+        if cancel is not None and cancel():
+            raise RuntimeError("已取消补全")
+        if progress is not None:
+            progress(f"检查 {task['label']}", processed, processed + len(targets))
+        if _file_ok(task["dest"], task["size"], task["sha1"]):
+            skipped += 1
+            continue
+        if not task["url"]:
+            failed += 1
+            notes.append(f"{task['label']}：缺少下载地址")
+            continue
+        try:
+            net.download(
+                task["url"],
+                task["dest"],
+                expected_sha1=task["sha1"] or None,
+                expected_size=task["size"] or None,
+            )
+        except Exception as exc:  # noqa: BLE001 - one bad file must not abort the rest
+            failed += 1
+            notes.append(f"{task['label']}：{exc}")
+            continue
+        downloaded += 1
+        if task["dest"] == index_file:
+            expand_assets()
+    return {
+        "downloaded": downloaded,
+        "skipped": skipped,
+        "failed": failed,
+        "notes": notes,
+    }
+
+
+CATALOG_BATCH = 20
+CATALOG_ROW_HEIGHT = 66
+
+
+def _catalog_label(entry) -> str:
+    label = entry.id
+    if entry.type == "snapshot":
+        label += "  · 快照"
+    elif entry.type in ("old_beta", "old_alpha"):
+        label += "  · 旧版"
+    return label
+
+
+def _catalog_matches(entry, mode: str, query: str) -> bool:
+    if mode == "old":
+        if entry.type not in ("old_beta", "old_alpha"):
+            return False
+    elif mode != "all" and entry.type != mode:
+        return False
+    if query and query not in entry.id.lower():
+        return False
+    return True
+
+
+class VersionListModel(QAbstractListModel):
+    """Every catalog entry, filtered up front and revealed one batch at a time."""
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self._all: list = []
+        self._rows: list = []
+        self._loaded = 0
+        self._mode = "all"
+        self._query = ""
+
+    def rowCount(self, parent=QModelIndex()) -> int:  # noqa: N802
+        if parent.isValid():
+            return 0
+        return min(self._loaded, len(self._rows))
+
+    def data(self, index, role=Qt.ItemDataRole.DisplayRole):  # noqa: N802
+        if not index.isValid() or index.row() >= self.rowCount():
+            return None
+        entry = self._rows[index.row()]
+        if role == Qt.ItemDataRole.UserRole:
+            return entry
+        if role == Qt.ItemDataRole.DisplayRole:
+            return _catalog_label(entry)
+        return None
+
+    def reset_entries(self, entries, mode: str, query: str) -> None:
+        self.beginResetModel()
+        self._all = list(entries or [])
+        self._mode = str(mode or "all")
+        self._query = str(query or "").strip().lower()
+        self._rows = [
+            entry
+            for entry in self._all
+            if _catalog_matches(entry, self._mode, self._query)
+        ]
+        self._loaded = min(CATALOG_BATCH, len(self._rows))
+        self.endResetModel()
+
+    def load_more(self) -> int:
+        if not self.has_more():
+            return self.loaded_count()
+        start = self._loaded
+        end = min(self._loaded + CATALOG_BATCH, len(self._rows))
+        self.beginInsertRows(QModelIndex(), start, end - 1)
+        self._loaded = end
+        self.endInsertRows()
+        return self._loaded
+
+    def has_more(self) -> bool:
+        return self._loaded < len(self._rows)
+
+    def loaded_count(self) -> int:
+        return min(self._loaded, len(self._rows))
+
+    def total_count(self) -> int:
+        return len(self._rows)
+
+    def entry_at(self, row: int):
+        if 0 <= row < self.rowCount():
+            return self._rows[row]
+        return None
+
+    def row_of(self, entry_id: str) -> int:
+        target = str(entry_id or "")
+        if not target:
+            return -1
+        for row, entry in enumerate(self._rows):
+            if str(getattr(entry, "id", "") or "") == target:
+                return row
+        return -1
+
+    def ensure_loaded(self, row: int) -> None:
+        while self._loaded <= row and self.has_more():
+            self.load_more()
+
+
 class InstallPage(QWidget):
     log_requested = Signal(str, str)
     install_requested = Signal(str)
@@ -1726,6 +2426,12 @@ class InstallPage(QWidget):
         self.mc_dir: Path | None = None
         self.info: dict | None = None
         self.version_dir: Path | None = None
+        self._catalog_entries: list = []
+        self._selected_entry_id = ""
+        self._backfilled_id = ""
+        self._tools_available = False
+        self._installing = False
+        self._repairing = False
         self._build()
         self.stack.setCurrentWidget(self.empty_page)
 
@@ -1745,10 +2451,9 @@ class InstallPage(QWidget):
         header.addWidget(subtitle)
         outer.addLayout(header)
 
-        catalog_card, catalog_layout = _card(
-            "浏览官方版本",
-            "直接从 Mojang 版本清单浏览正式版与快照，选择后即可下载安装。",
-        )
+        # No in-card heading: the tab bar already names this section, and the
+        # duplicate title stole a whole row of vertical space.
+        catalog_card, catalog_layout = _card()
         filter_row = QHBoxLayout()
         filter_row.setSpacing(8)
         self.catalog_filter = QComboBox()
@@ -1763,45 +2468,75 @@ class InstallPage(QWidget):
         self.catalog_search.setPlaceholderText("搜索版本号…")
         self.catalog_search.textChanged.connect(self._fill_catalog)
         filter_row.addWidget(self.catalog_search, 1)
+        catalog_layout.addLayout(filter_row)
+
+        # Two rows instead of one: a single row of three buttons hard-codes a
+        # minimum width the column cannot shrink below.
+        catalog_actions = QHBoxLayout()
+        catalog_actions.setSpacing(8)
         self.catalog_refresh = QPushButton("刷新列表")
         self.catalog_refresh.setObjectName("Ghost")
         self.catalog_refresh.clicked.connect(self.load_catalog)
-        filter_row.addWidget(self.catalog_refresh)
+        catalog_actions.addWidget(self.catalog_refresh)
         self.catalog_browse = QPushButton("全屏浏览")
         self.catalog_browse.setObjectName("Ghost")
         self.catalog_browse.clicked.connect(self.browse_requested.emit)
-        filter_row.addWidget(self.catalog_browse)
+        catalog_actions.addWidget(self.catalog_browse)
+        catalog_actions.addStretch(1)
+        catalog_layout.addLayout(catalog_actions)
+
+        install_actions = QHBoxLayout()
+        install_actions.setSpacing(8)
         self.catalog_install = QPushButton("安装选中版本")
         self.catalog_install.setObjectName("Primary")
         self.catalog_install.setEnabled(False)
         self.catalog_install.clicked.connect(self._install_catalog_selection)
-        filter_row.addWidget(self.catalog_install)
-        catalog_layout.addLayout(filter_row)
+        install_actions.addWidget(self.catalog_install)
+        install_actions.addStretch(1)
+        catalog_layout.addLayout(install_actions)
 
-        self.catalog_list = QListWidget()
+        # A model/view pair instead of stacked items: the model owns all entries
+        # and reveals them batch by batch, so thousands of versions never become
+        # thousands of widgets.
+        self.catalog_model = VersionListModel(self)
+        self.catalog_list = QListView()
         self.catalog_list.setObjectName("CatalogList")
-        self.catalog_list.setMaximumHeight(272)
+        # The list scrolls its own contents; keep the minimum small so column 1
+        # never forces the window-level layout to grow.
+        self.catalog_list.setMinimumHeight(260)
+        self.catalog_list.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
+        )
         self.catalog_list.setHorizontalScrollBarPolicy(
             Qt.ScrollBarPolicy.ScrollBarAlwaysOff
         )
         self.catalog_list.setSpacing(1)
         self.catalog_list.setUniformItemSizes(True)
         self.catalog_list.setMouseTracking(True)
+        self.catalog_list.setSelectionMode(
+            QAbstractItemView.SelectionMode.SingleSelection
+        )
         self.catalog_list.setVerticalScrollMode(
             QAbstractItemView.ScrollMode.ScrollPerPixel
         )
+        self.catalog_list.setModel(self.catalog_model)
         self.catalog_list.setItemDelegate(VersionCardDelegate(self.catalog_list))
-        self.catalog_list.itemSelectionChanged.connect(self._on_catalog_selected)
-        self.catalog_list.itemDoubleClicked.connect(
-            lambda _item: self._install_catalog_selection()
+        self.catalog_list.selectionModel().selectionChanged.connect(
+            self._on_catalog_selected
         )
-        catalog_layout.addWidget(self.catalog_list)
+        self.catalog_list.activated.connect(
+            lambda _index: self._install_catalog_selection()
+        )
+        self.catalog_list.verticalScrollBar().valueChanged.connect(
+            self._maybe_load_more
+        )
+        catalog_layout.addWidget(self.catalog_list, 1)
         self.catalog_status = QLabel("打开此页后自动加载 Mojang 官方版本清单")
         self.catalog_status.setObjectName("Hint")
+        self.catalog_status.setWordWrap(True)
         catalog_layout.addWidget(self.catalog_status)
-        outer.addWidget(catalog_card)
 
-        install_card, install_layout = _card("官方源安装")
+        install_card, install_layout = _card()
         row = QHBoxLayout()
         row.setSpacing(8)
         self.install_version_edit = QLineEdit()
@@ -1826,15 +2561,27 @@ class InstallPage(QWidget):
         self.install_status.setObjectName("InstallStatus")
         self.install_status.setWordWrap(True)
         install_layout.addWidget(self.install_status)
-        outer.addWidget(install_card)
+
+        self.install_skip_note = QLabel(
+            "本地已存在文件会自动跳过：版本 JSON、依赖库、资源文件与客户端 JAR "
+            "只要磁盘上已完整存在就不会重复下载；中断后再次点击「开始下载」即可续传。"
+        )
+        self.install_skip_note.setObjectName("Hint")
+        self.install_skip_note.setWordWrap(True)
+        install_layout.addWidget(self.install_skip_note)
+        install_layout.addStretch(1)
 
         self.stack = QStackedWidget()
-        outer.addWidget(self.stack, 1)
+        # Minimum vertical policy keeps the stack at its size hint height, so the
+        # column scroll area scrolls it instead of clipping the validation list.
+        self.stack.setSizePolicy(
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum
+        )
 
         self.empty_page = QWidget()
         empty_layout = QVBoxLayout(self.empty_page)
         empty_layout.setContentsMargins(0, 12, 0, 0)
-        empty = QLabel("在左侧选择一个已安装版本，可查看本地文件校验结果")
+        empty = QLabel("在版本列表中选择一个已安装版本，可查看本地文件校验结果")
         empty.setObjectName("EmptyHint")
         empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
         empty.setWordWrap(True)
@@ -1850,18 +2597,41 @@ class InstallPage(QWidget):
         summary, summary_layout = _card()
         self.version_name = QLabel("—")
         self.version_name.setObjectName("PageTitle")
+        self.version_name.setWordWrap(True)
         summary_layout.addWidget(self.version_name)
         self.version_meta = QLabel("")
         self.version_meta.setObjectName("Muted")
+        self.version_meta.setWordWrap(True)
+        # Both must wrap instead of dictating a hard minimum width for the column.
+        for label in (self.version_name, self.version_meta):
+            label.setSizePolicy(
+                QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred
+            )
         summary_layout.addWidget(self.version_meta)
-        self.detail_labels: dict[str, QLabel] = {}
+        self.detail_labels: dict[str, QWidget] = {}
         detail_form = QFormLayout()
         detail_form.setHorizontalSpacing(18)
         detail_form.setVerticalSpacing(5)
         for key, label in (("type", "版本类型"), ("main_class", "主类"), ("path", "版本目录")):
-            value = QLabel("—")
-            value.setWordWrap(True)
-            value.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+            if key == "main_class":
+                # A class name is one long token with no break opportunity, so a
+                # wrapping label would truncate it. A frameless read-only field
+                # keeps the whole value selectable/scrollable and stays tiny.
+                value = QLineEdit("—")
+                value.setReadOnly(True)
+                value.setFrame(False)
+                value.setStyleSheet("background: transparent; border: none; padding: 0;")
+            else:
+                value = QLabel("—")
+                value.setWordWrap(True)
+                # Long paths must wrap inside the card instead of dictating a
+                # hard minimum width for this column.
+                value.setSizePolicy(
+                    QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred
+                )
+                value.setTextInteractionFlags(
+                    Qt.TextInteractionFlag.TextSelectableByMouse
+                )
             detail_form.addRow(_field(label), value)
             self.detail_labels[key] = value
         summary_layout.addLayout(detail_form)
@@ -1874,36 +2644,233 @@ class InstallPage(QWidget):
         self.checks_layout.setSpacing(7)
         checks_layout.addWidget(self.checks_host)
 
-        actions = QHBoxLayout()
-        actions.setSpacing(8)
-        validate = QPushButton("校验文件")
-        validate.clicked.connect(self.validate)
-        actions.addWidget(validate)
-        open_dir = QPushButton("打开版本目录")
-        open_dir.setObjectName("Ghost")
-        open_dir.clicked.connect(self.open_version_dir)
-        actions.addWidget(open_dir)
-        actions.addStretch(1)
         note = QLabel("安装完成后建议重新校验")
         note.setObjectName("Hint")
-        actions.addWidget(note)
-        checks_layout.addLayout(actions)
+        note.setWordWrap(True)
+        checks_layout.addWidget(note)
         content.addWidget(checks_card)
         content.addStretch(1)
+        self.stack.addWidget(self.content_page)
 
-        # The validation list needs more height than a short window can give;
-        # scroll it instead of squeezing the labels into unreadable slivers.
-        self.content_scroll = QScrollArea()
-        self.content_scroll.setObjectName("InstallContentScroll")
-        self.content_scroll.setWidgetResizable(True)
-        self.content_scroll.setFrameShape(QFrame.Shape.NoFrame)
-        self.content_scroll.setHorizontalScrollBarPolicy(
-            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
-        )
-        self.content_scroll.setWidget(self.content_page)
-        self.stack.addWidget(self.content_scroll)
+        tools_card, tools_layout = _card()
+        tool_row = QHBoxLayout()
+        tool_row.setSpacing(8)
+        self.tool_validate = QPushButton("校验版本文件")
+        self.tool_validate.setObjectName("Ghost")
+        self.tool_validate.setEnabled(False)
+        self.tool_validate.clicked.connect(self.validate)
+        tool_row.addWidget(self.tool_validate)
+        self.tool_repair = QPushButton("补全缺失文件")
+        self.tool_repair.setObjectName("Primary")
+        self.tool_repair.setEnabled(False)
+        self.tool_repair.clicked.connect(self._repair_version)
+        tool_row.addWidget(self.tool_repair)
+        tool_row.addStretch(1)
+        tools_layout.addLayout(tool_row)
+
+        tool_open_row = QHBoxLayout()
+        tool_open_row.setSpacing(8)
+        self.tool_open = QPushButton("打开版本目录")
+        self.tool_open.setObjectName("Ghost")
+        self.tool_open.setEnabled(False)
+        self.tool_open.clicked.connect(self.open_version_dir)
+        tool_open_row.addWidget(self.tool_open)
+        tool_open_row.addStretch(1)
+        tools_layout.addLayout(tool_open_row)
+
+        self.tool_status = QLabel("未选择版本：请先在「浏览官方版本」列表中选择一个已安装版本")
+        self.tool_status.setObjectName("Hint")
+        self.tool_status.setWordWrap(True)
+        tools_layout.addWidget(self.tool_status)
+        tools_layout.addWidget(self.stack, 1)
+
+        # Exactly one scroll area per tab and no card wrapped twice: the tab card
+        # scrolls on its own, and no two scroll areas are ever nested.
+        self.catalog_scroll = _tab_scroll(catalog_card, "CatalogScroll", 260)
+        self.install_scroll = _tab_scroll(install_card, "InstallScroll", 260)
+        self.tools_scroll = _tab_scroll(tools_card, "InstallContentScroll", 260)
+
+        # The same plain QTabWidget the 百宝箱 uses: every card look comes from the
+        # global QSS, so no local styling is added and nothing can drift.
+        self.tabs = QTabWidget()
+        self.tabs.setObjectName("ToolTabs")
+        tab_bar = self.tabs.tabBar()
+        # A pill bar must hug its labels: expanding stretches each tab across the
+        # whole row, scroll buttons add arrows, and the base line draws under the
+        # selected pill.
+        tab_bar.setExpanding(False)
+        tab_bar.setUsesScrollButtons(False)
+        tab_bar.setDrawBase(False)
+        for page, label in (
+            (self.catalog_scroll, "浏览官方版本"),
+            (self.install_scroll, "官方源安装"),
+            (self.tools_scroll, "版本辅助工具"),
+        ):
+            self.tabs.addTab(page, label)
+        outer.addWidget(self.tabs, 1)
+        self.loading = LoadingOverlay(self)
+        # Apply the tool-button state once, so validation is clickable (and can
+        # answer with a prompt) even before a version is ever selected.
+        self._sync_tools_enabled()
 
     # -------------------------------------------------------------- install UI
+    def _set_tools_enabled(self, available: bool) -> None:
+        self._tools_available = bool(available)
+        self._sync_tools_enabled()
+
+    def _idle_tools_text(self) -> str:
+        """Neutral tool-card line for the current selection."""
+        if not getattr(self, "_tools_available", False):
+            return "未选择版本：请先在「浏览官方版本」列表中选择一个已安装版本"
+        version_id = str((self.info or {}).get("id") or "—")
+        return f"当前版本 {version_id}：可校验文件完整性或补全缺失文件"
+
+    def _sync_tools_enabled(self) -> None:
+        """One place decides the three tool buttons: version present and idle.
+
+        A download or a repair disables them on top of the "no version selected"
+        dimension, so neither state can re-enable a button the other disabled.
+        """
+        available = bool(getattr(self, "_tools_available", False))
+        busy = bool(getattr(self, "_installing", False)) or bool(
+            getattr(self, "_repairing", False)
+        )
+        # Validation stays clickable without a selected version so a click can
+        # answer with a prompt instead of doing nothing at all.
+        self.tool_validate.setEnabled(not busy)
+        for button in (self.tool_repair, self.tool_open):
+            button.setEnabled(available and not busy)
+        if busy:
+            self.tool_status.setText("正在下载 / 补全…校验、补全与打开目录暂时不可用")
+        else:
+            self.tool_status.setText(self._idle_tools_text())
+
+    def cancel_pending_operation(self, text: str = "") -> None:
+        """Return the tool card to a neutral state (public, idempotent).
+
+        main_window calls this when an install request is refused, so a stale
+        "正在补全 …" line and a running/indeterminate progress bar never outlive
+        the request that produced them.  An installation that is still running
+        keeps the buttons disabled; set_installing(False) finishes that off.
+        """
+        self._repairing = False
+        bar = self.install_progress
+        unsettled = (
+            bar.maximum() != 100
+            or bar.value() != 0
+            or bool(getattr(bar, "_shimmer", False))
+        )
+        if unsettled:
+            bar.set_shimmer(False)
+            bar.setRange(0, 100)
+            bar.setValue(0)
+            bar.setFormat("%p%")
+        self._sync_tools_enabled()
+        self.tool_status.setText(text or self._idle_tools_text())
+
+    def _own_raw(self) -> dict:
+        """The version JSON this page was handed, read from disk when missing."""
+        raw = self.info.get("raw") if isinstance(self.info, dict) else None
+        if isinstance(raw, dict) and raw:
+            return raw
+        if not self.mc_dir or not self.info:
+            return {}
+        version_id = str(self.info.get("id") or "")
+        if not version_id:
+            return {}
+        try:
+            return _read_version_json(self.mc_dir / "versions", version_id)
+        except (OSError, ValueError):
+            return {}
+
+    def _repair_version(self) -> None:
+        if not self.info:
+            self.tool_status.setText("请先在「浏览官方版本」列表中选择一个已安装版本")
+            return
+        version_id = str(self.info.get("id") or "")
+        if not version_id or self._repairing:
+            return
+        self.log_requested.emit("info", f"[辅助工具] 请求补全版本文件：{version_id}")
+        own_raw = self._own_raw()
+        if not str(own_raw.get("inheritsFrom") or ""):
+            # A plain official version: the kernel install chain already covers it.
+            self.tool_status.setText(f"正在补全 {version_id} 的缺失文件…")
+            self.install_requested.emit(version_id)
+            return
+        if not self.mc_dir:
+            self.tool_status.setText("缺少游戏目录，无法本地补全版本文件")
+            return
+        mc_dir = Path(self.mc_dir)
+        versions_dir = mc_dir / "versions"
+        self._repairing = True
+        self._sync_tools_enabled()
+        self.tool_status.setText(f"正在补全 {version_id} 的缺失文件…")
+        self.install_progress.set_shimmer(True)
+        self.install_progress.setRange(0, 0)
+        self.install_progress.setFormat("补全中…")
+        self.log_requested.emit(
+            "info", f"[辅助工具] 本地补全 {version_id}：合并继承版本的依赖后逐个补齐缺失文件"
+        )
+        start_task(
+            self,
+            lambda progress, cancel: _repair_local_files(
+                mc_dir, versions_dir, version_id, own_raw, progress, cancel
+            ),
+            on_done=self._on_repair_done,
+            on_failed=self._on_repair_failed,
+            on_progress=self._on_repair_progress,
+        )
+
+    def _on_repair_progress(self, message: str, done: int, total: int) -> None:
+        self.install_progress.set_shimmer(True)
+        if total > 0:
+            value = max(0, min(done, total))
+            self.install_progress.setRange(0, total)
+            self.install_progress.setValue(value)
+            self.install_progress.setFormat(f"{value} / {total}")
+        else:
+            self.install_progress.setRange(0, 0)
+            self.install_progress.setFormat("补全中…")
+        self.tool_status.setText(message)
+
+    def _reset_repair_state(self) -> None:
+        """Always leave 正在补全 behind, whatever the task outcome was."""
+        self._repairing = False
+        self.install_progress.set_shimmer(False)
+        self.install_progress.setRange(0, 100)
+        self.install_progress.setValue(0)
+        self.install_progress.setFormat("%p%")
+        self._sync_tools_enabled()
+
+    def _on_repair_done(self, result) -> None:
+        self._reset_repair_state()
+        data = result if isinstance(result, dict) else {}
+        downloaded = _int_or_zero(data.get("downloaded"))
+        skipped = _int_or_zero(data.get("skipped"))
+        failed = _int_or_zero(data.get("failed"))
+        summary = f"补全完成：下载 {downloaded} 项 · 已存在跳过 {skipped} 项"
+        if failed:
+            summary += f" · 失败 {failed} 项"
+        self.tool_status.setText(summary)
+        self.log_requested.emit("warn" if failed else "success", summary)
+        for note in (data.get("notes") or [])[:5]:
+            self.log_requested.emit("warn", f"[辅助工具] {note}")
+        self.run_checks()
+
+    def _on_repair_failed(self, message: str) -> None:
+        self._reset_repair_state()
+        self.tool_status.setText(f"补全失败：{message}")
+        self.log_requested.emit("error", f"[辅助工具] 本地补全失败：{message}")
+
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        loading = getattr(self, "loading", None)
+        if loading is not None:
+            loading.setGeometry(self.rect())
+        if getattr(self, "catalog_model", None) is not None:
+            # A taller viewport shows more rows, so it needs more loaded batches.
+            QTimer.singleShot(0, self._maybe_load_more)
+
     def showEvent(self, event) -> None:  # noqa: N802
         super().showEvent(event)
         if not getattr(self, "_catalog_entries", None) and not getattr(
@@ -1916,6 +2883,7 @@ class InstallPage(QWidget):
             return
         self._catalog_loading = True
         self.catalog_refresh.setEnabled(False)
+        self.loading.show_loading("正在加载官方版本 JSON…")
         self.catalog_status.setText("正在获取 Mojang 官方版本清单…")
         start_task(
             self,
@@ -1927,6 +2895,7 @@ class InstallPage(QWidget):
     def _on_catalog_loaded(self, entries) -> None:
         self._catalog_loading = False
         self.catalog_refresh.setEnabled(True)
+        self.loading.stop()
         self._catalog_entries = list(entries or [])
         self._fill_catalog()
         self.catalog_status.setText(f"已加载 {len(self._catalog_entries)} 个官方版本")
@@ -1934,6 +2903,7 @@ class InstallPage(QWidget):
     def _on_catalog_failed(self, message: str) -> None:
         self._catalog_loading = False
         self.catalog_refresh.setEnabled(True)
+        self.loading.stop()
         self.catalog_status.setText(f"获取版本清单失败：{message}")
         self.log_requested.emit("warn", f"获取 Mojang 版本清单失败：{message}")
 
@@ -1941,49 +2911,99 @@ class InstallPage(QWidget):
         entries = getattr(self, "_catalog_entries", [])
         mode = str(self.catalog_filter.currentData() or "all")
         query = self.catalog_search.text().strip().lower()
-        self.catalog_list.blockSignals(True)
-        self.catalog_list.clear()
-        shown = 0
-        for entry in entries:
-            if mode == "old":
-                if entry.type not in ("old_beta", "old_alpha"):
-                    continue
-            elif mode != "all" and entry.type != mode:
-                continue
-            if query and query not in entry.id.lower():
-                continue
-            label = entry.id
-            if entry.type == "snapshot":
-                label += "  · 快照"
-            elif entry.type in ("old_beta", "old_alpha"):
-                label += "  · 旧版"
-            item = QListWidgetItem(label)
-            item.setData(Qt.ItemDataRole.UserRole, entry)
-            item.setSizeHint(QSize(100, 64))
-            self.catalog_list.addItem(item)
-            shown += 1
-        self.catalog_list.blockSignals(False)
+        previous = getattr(self, "_selected_entry_id", "")
+        selection = self.catalog_list.selectionModel()
+        # Rebuilding the model drops the selection transiently; silencing it keeps
+        # the restored selection from flickering through an empty state.
+        selection.blockSignals(True)
+        try:
+            self.catalog_model.reset_entries(entries, mode, query)
+        finally:
+            selection.blockSignals(False)
+        # A rebuilt filter is a new list: start the reader at its first batch.
+        self.catalog_list.scrollToTop()
         self.catalog_install.setEnabled(False)
-        if entries:
-            self.catalog_status.setText(f"显示 {shown} / {len(entries)} 个版本")
+        # Selection and the backfilled version id must stay one-way consistent: a
+        # filter that hides the selected version must not leave its id behind in
+        # the install field, or 开始下载 would install a version nobody can see (C3).
+        restored = bool(previous) and self._restore_selection(previous)
+        if not restored:
+            self._drop_stale_selection()
+        if entries and not restored:
+            self.catalog_status.setText(
+                f"显示 {self.catalog_model.total_count()} / {len(entries)} 个版本"
+            )
+        QTimer.singleShot(0, self._maybe_load_more)
 
-    def _on_catalog_selected(self) -> None:
-        items = self.catalog_list.selectedItems()
-        if not items:
+    def _catalog_capacity(self) -> int:
+        """How many rows the viewport can show, plus one as the scroll-ahead."""
+        viewport = self.catalog_list.viewport()
+        height = viewport.height() if viewport is not None else 0
+        return max(1, int(height) // CATALOG_ROW_HEIGHT) + 1
+
+    def _maybe_load_more(self) -> None:
+        """Top up the model: fill the viewport, then one batch per scroll to the end."""
+        model = getattr(self, "catalog_model", None)
+        if model is None:
+            return
+        capacity = self._catalog_capacity()
+        if model.loaded_count() < capacity:
+            guard = 0
+            while (
+                model.has_more()
+                and model.loaded_count() < capacity
+                and guard < 64
+            ):
+                model.load_more()
+                guard += 1
+            return
+        bar = self.catalog_list.verticalScrollBar()
+        if (
+            model.has_more()
+            and bar.maximum() > 0
+            and bar.value() >= bar.maximum() - CATALOG_ROW_HEIGHT
+        ):
+            model.load_more()
+
+    def _restore_selection(self, entry_id: str) -> bool:
+        """Re-select entry_id after a refill; False when it is no longer listed."""
+        row = self.catalog_model.row_of(entry_id)
+        if row < 0:
+            return False
+        self.catalog_model.ensure_loaded(row)
+        index = self.catalog_model.index(row, 0)
+        if not index.isValid():
+            return False
+        self.catalog_list.setCurrentIndex(index)
+        return True
+
+    def _drop_stale_selection(self) -> None:
+        """Forget a version id the list cannot show any more (never a ghost id)."""
+        text = self.install_version_edit.text().strip()
+        if self._backfilled_id and text == self._backfilled_id:
+            self.install_version_edit.setText("")
+        self._backfilled_id = ""
+
+    def _on_catalog_selected(self, *_args) -> None:
+        indexes = self.catalog_list.selectionModel().selectedIndexes()
+        if not indexes:
+            self._selected_entry_id = ""
             self.catalog_install.setEnabled(False)
             return
-        entry = items[0].data(Qt.ItemDataRole.UserRole)
+        entry = self.catalog_model.entry_at(indexes[0].row())
         if entry is None:
             return
+        self._selected_entry_id = str(entry.id)
+        self._backfilled_id = str(entry.id)
         self.install_version_edit.setText(entry.id)
         self.catalog_install.setEnabled(True)
         self.catalog_status.setText(f"已选择 {entry.id} · {entry.release_time[:10]}")
 
     def _install_catalog_selection(self) -> None:
-        items = self.catalog_list.selectedItems()
-        if not items:
+        indexes = self.catalog_list.selectionModel().selectedIndexes()
+        if not indexes:
             return
-        entry = items[0].data(Qt.ItemDataRole.UserRole)
+        entry = self.catalog_model.entry_at(indexes[0].row())
         if entry is None:
             return
         self.install_version_edit.setText(entry.id)
@@ -1997,6 +3017,7 @@ class InstallPage(QWidget):
         self.install_requested.emit(version_id)
 
     def set_installing(self, running: bool, version: str = "") -> None:
+        self._installing = bool(running)
         self.install_button.setEnabled(not running)
         self.install_button.setText("下载中…" if running else "开始下载")
         self.install_version_edit.setEnabled(not running)
@@ -2009,10 +3030,14 @@ class InstallPage(QWidget):
             self.install_status.setText(f"正在从 Mojang 官方源下载 {version} …")
         else:
             self.install_progress.set_shimmer(False)
-            if self.install_progress.maximum() <= 0:
-                self.install_progress.setRange(0, 100)
-                self.install_progress.setValue(0)
+            # Zero the bar explicitly: leaving the last 100% behind made a finished
+            # download look like it was still running (C2).
+            self.install_progress.setRange(0, 100)
+            self.install_progress.setValue(0)
             self.install_progress.setFormat("%p%")
+        # The tool buttons follow the download: repairing/validating a version that
+        # is being written would race the installer (C2).
+        self._sync_tools_enabled()
         _repolish(self.install_status)
 
     def set_install_progress(self, done: int, total: int, current: str) -> None:
@@ -2047,8 +3072,12 @@ class InstallPage(QWidget):
     # -------------------------------------------------------------- data API
     def set_version(self, mc_dir: str, info: dict | None) -> None:
         if not info:
+            # Keep the directory and drop the stale version path with it (C4).
+            self.mc_dir = Path(mc_dir) if mc_dir else None
             self.info = None
+            self.version_dir = None
             self.stack.setCurrentWidget(self.empty_page)
+            self._set_tools_enabled(False)
             return
         self.mc_dir = Path(mc_dir)
         self.info = info
@@ -2059,37 +3088,116 @@ class InstallPage(QWidget):
 
         self.version_name.setText(version_id)
         self.version_meta.setText("Minecraft 版本 · " + TYPE_LABELS.get(vtype, vtype))
-        self.detail_labels["type"].setText(TYPE_LABELS.get(vtype, vtype))
-        self.detail_labels["main_class"].setText(str(raw.get("mainClass") or "—"))
-        self.detail_labels["path"].setText(str(self.version_dir))
-        self.stack.setCurrentWidget(self.content_scroll)
-        if self.content_scroll.verticalScrollBar() is not None:
-            self.content_scroll.verticalScrollBar().setValue(0)
+        detail_values = {
+            "type": TYPE_LABELS.get(vtype, vtype),
+            "main_class": str(raw.get("mainClass") or "—"),
+            "path": str(self.version_dir),
+        }
+        for key, text in detail_values.items():
+            self.detail_labels[key].setText(text)
+            self.detail_labels[key].setToolTip(text)
+        self.stack.setCurrentWidget(self.content_page)
+        bar = self.tools_scroll.verticalScrollBar()
+        if bar is not None:
+            bar.setValue(0)
+        self._set_tools_enabled(True)
         self.run_checks()
 
     # ----------------------------------------------------------------- checks
+    def _raw_for(self, versions_dir: Path, version_id: str) -> dict:
+        try:
+            return _read_version_json(versions_dir, version_id)
+        except (OSError, ValueError):
+            return {}
+
+    def _version_libraries(self, versions_dir: Path, version_id: str, raw: dict) -> list:
+        """Libraries the version really needs: its own plus every inherited parent."""
+        own = raw.get("libraries") if isinstance(raw.get("libraries"), list) else []
+        if not raw:
+            return own
+        try:
+            chain = _version_chain(versions_dir, version_id, raw)
+        except (OSError, ValueError):
+            return own
+        if len(chain) == 1:
+            return own
+        return _merge_chain(chain).get("libraries") or own
+
+    def _client_jar_check(self, versions_dir: Path, version_id: str, raw: dict) -> dict:
+        """Client JAR check that follows inheritsFrom like the kernel does (B3)."""
+        current = version_id
+        seen: set[str] = set()
+        for _ in range(INHERIT_MAX_DEPTH + 1):
+            if not current or current in seen:
+                break
+            seen.add(current)
+            jar = versions_dir / current / f"{current}.jar"
+            if jar.is_file():
+                owner_raw = raw if current == version_id else self._raw_for(versions_dir, current)
+                downloads = (
+                    owner_raw.get("downloads")
+                    if isinstance(owner_raw.get("downloads"), dict)
+                    else {}
+                )
+                client = (
+                    downloads.get("client")
+                    if isinstance(downloads.get("client"), dict)
+                    else {}
+                )
+                # A zero-byte or truncated jar is present but not usable (B4).
+                ok = _file_ok(
+                    jar,
+                    _int_or_zero(client.get("size")),
+                    str(client.get("sha1") or ""),
+                )
+                detail = jar.name
+                if current != version_id:
+                    detail = f"{jar.name} · 回退父版本 {current}"
+                return {"title": "客户端 JAR", "detail": detail, "state": "ok" if ok else "bad"}
+            parent = raw if current == version_id else self._raw_for(versions_dir, current)
+            current = str(parent.get("inheritsFrom") or "")
+        return {"title": "客户端 JAR", "detail": f"{version_id}.jar", "state": "bad"}
+
+    def _library_check(self, libraries: list) -> dict:
+        """Library count that matches what lands in libraries/ (B2)."""
+        files = _library_files(libraries)
+        expected = len(files)
+        if expected == 0:
+            return {"title": "依赖库", "detail": "版本 JSON 未声明依赖库", "state": "warn"}
+        present = 0
+        broken = 0
+        large_only = False
+        for item in files:
+            path = self.mc_dir / "libraries" / item["rel"]
+            if _sha1_skipped(item["size"], item["sha1"]):
+                large_only = True
+            if _file_ok(path, item["size"], item["sha1"]):
+                present += 1
+            elif path.is_file():
+                # Present but empty/truncated/hash-mismatched: not "already there".
+                broken += 1
+        detail = f"{present} / {expected} 已存在"
+        if broken:
+            detail += f" · {broken} 个损坏或截断"
+        if large_only:
+            detail += " · 超大文件仅比对大小"
+        return {
+            "title": "依赖库",
+            "detail": detail,
+            "state": "ok" if present == expected else "bad",
+        }
+
     def _collect_checks(self) -> list[dict]:
         checks: list[dict] = []
         if not self.version_dir or not self.mc_dir or not self.info:
             return checks
         version_id = str(self.info.get("id", ""))
+        versions_dir = self.mc_dir / "versions"
         manifest = self.version_dir / f"{version_id}.json"
-        client_jar = self.version_dir / f"{version_id}.jar"
         raw = self.info.get("raw") if isinstance(self.info.get("raw"), dict) else {}
-        libraries = raw.get("libraries") if isinstance(raw.get("libraries"), list) else []
-        expected = 0
-        present = 0
-        for lib in libraries:
-            if not isinstance(lib, dict):
-                continue
-            downloads = lib.get("downloads") if isinstance(lib.get("downloads"), dict) else {}
-            artifact = downloads.get("artifact") if isinstance(downloads.get("artifact"), dict) else {}
-            rel = artifact.get("path")
-            if not rel:
-                continue
-            expected += 1
-            if (self.mc_dir / "libraries" / str(rel)).is_file():
-                present += 1
+        if not raw:
+            raw = self._raw_for(versions_dir, version_id)
+        libraries = self._version_libraries(versions_dir, version_id, raw)
 
         checks.append(
             {
@@ -2098,23 +3206,8 @@ class InstallPage(QWidget):
                 "state": "ok" if manifest.is_file() else "bad",
             }
         )
-        checks.append(
-            {
-                "title": "客户端 JAR",
-                "detail": client_jar.name,
-                "state": "ok" if client_jar.is_file() else "bad",
-            }
-        )
-        if expected == 0:
-            checks.append({"title": "依赖库", "detail": "版本 JSON 未声明依赖库", "state": "warn"})
-        else:
-            checks.append(
-                {
-                    "title": "依赖库",
-                    "detail": f"{present} / {expected} 已存在",
-                    "state": "ok" if present == expected else "bad",
-                }
-            )
+        checks.append(self._client_jar_check(versions_dir, version_id, raw))
+        checks.append(self._library_check(libraries))
         natives = self.version_dir / "natives"
         checks.append(
             {
@@ -2126,7 +3219,17 @@ class InstallPage(QWidget):
         return checks
 
     def run_checks(self) -> list[dict]:
-        checks = self._collect_checks()
+        try:
+            checks = self._collect_checks()
+        except Exception as exc:  # noqa: BLE001 - reported to the user below
+            self.log_requested.emit("error", f"校验本地文件时出错：{exc}")
+            checks = [
+                {
+                    "title": "校验失败",
+                    "detail": f"{type(exc).__name__}: {exc}",
+                    "state": "bad",
+                }
+            ]
         while self.checks_layout.count():
             item = self.checks_layout.takeAt(0)
             widget = item.widget()
@@ -2148,22 +3251,72 @@ class InstallPage(QWidget):
             detail = QLabel(check["detail"])
             detail.setObjectName("Muted")
             detail.setWordWrap(True)
+            detail.setSizePolicy(
+                QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred
+            )
+            detail.setToolTip(check["detail"])
             line.addWidget(detail, 1)
             self.checks_layout.addWidget(row)
         return checks
 
     def validate(self) -> None:
+        """Check the local files and always answer with something visible."""
         if not self.info:
+            message = "请先在「浏览官方版本」列表中选择一个已安装版本，然后再校验文件。"
+            self.log_requested.emit("warn", "校验文件被跳过：当前没有选中版本。")
+            self._show_result("无法校验", message, "")
             return
-        checks = self.run_checks()
-        version_id = self.info.get("id", "?")
+        version_id = str(self.info.get("id") or "?")
         self.log_requested.emit("info", f"开始校验版本 {version_id} 的本地文件…")
+        try:
+            checks = self.run_checks()
+        except Exception as exc:  # noqa: BLE001 - must never disappear silently
+            detail = f"{type(exc).__name__}: {exc}"
+            self.log_requested.emit("error", f"校验版本 {version_id} 失败：{detail}")
+            self._show_result("校验失败", f"校验 {version_id} 时发生错误：", detail)
+            return
+        problems: list[str] = []
         for check in checks:
-            level = {"ok": "success", "warn": "warn", "bad": "error"}[check["state"]]
-            mark = {"ok": "✓", "warn": "!", "bad": "✗"}[check["state"]]
-            self.log_requested.emit(level, f"{mark} {check['title']}：{check['detail']}")
-        ok = all(check["state"] == "ok" for check in checks)
-        self.log_requested.emit("success" if ok else "warn", "校验完成：文件完整" if ok else "校验完成：存在缺失或未确认的文件")
+            state = str(check.get("state") or "warn")
+            level = {"ok": "success", "warn": "warn", "bad": "error"}.get(state, "warn")
+            mark = {"ok": "✓", "warn": "!", "bad": "✗"}.get(state, "?")
+            line = f"{mark} {check['title']}：{check['detail']}"
+            self.log_requested.emit(level, line)
+            if state != "ok":
+                problems.append(line)
+        ok = not problems
+        self.log_requested.emit(
+            "success" if ok else "warn",
+            "校验完成：文件完整" if ok else "校验完成：存在缺失或未确认的文件",
+        )
+        if ok:
+            self._show_result(
+                "文件完整",
+                f"版本 {version_id} 校验完毕：{len(checks)} 项检查全部正常。",
+                "",
+            )
+        else:
+            self._show_result(
+                "发现缺失或异常文件",
+                f"版本 {version_id} 共 {len(checks)} 项检查，其中 {len(problems)} 项需要处理：",
+                "\n".join(problems),
+            )
+
+    def _show_result(self, title: str, message: str, detail: str) -> None:
+        """Show a validation result in the in-window dialog style."""
+        box = QMessageBox(self)
+        box.setWindowTitle(title)
+        box.setIcon(
+            QMessageBox.Icon.Information if not detail else QMessageBox.Icon.Warning
+        )
+        box.setText(message)
+        if detail:
+            box.setDetailedText(detail)
+        box.setStandardButtons(QMessageBox.StandardButton.Ok)
+        try:
+            run_in_window(self, box, title)
+        except Exception as exc:  # noqa: BLE001 - a dialog must never raise
+            self.log_requested.emit("warn", f"无法显示校验结果对话框：{exc}")
 
     def open_version_dir(self) -> None:
         if not self.version_dir or not self.version_dir.is_dir():

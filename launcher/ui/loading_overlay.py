@@ -1,14 +1,21 @@
-"""Non-modal in-window loading animation (blue line C)."""
+"""Non-modal in-window loading overlay using the fixed thin-line C widget.
+
+The overlay fades in when work starts and fades out when it stops, and every
+show/stop pair is driven by a single animation whose finished signal is wired
+once, so overlapping show/stop calls can never leave a pending hide behind.
+"""
 
 from __future__ import annotations
 
-import math
+from PySide6.QtCore import QEasingCurve, QPropertyAnimation, Qt
+from PySide6.QtGui import QColor, QPainter
+from PySide6.QtWidgets import QGraphicsOpacityEffect, QLabel, QWidget
 
-from PySide6.QtCore import QPointF, QRectF, Qt, QTimer
-from PySide6.QtGui import QColor, QPainter, QPen
-from PySide6.QtWidgets import QWidget
+from .. import anim
+from .loading_widget import LineCLoading
 
-from .. import anim, theme
+FADE_IN_MS = 180
+FADE_OUT_MS = 200
 
 
 class LoadingOverlay(QWidget):
@@ -16,56 +23,73 @@ class LoadingOverlay(QWidget):
         super().__init__(parent)
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         self.setVisible(False)
-        self._angle = 0.0
-        self._phase = 0.0
         self._text = "正在加载…"
-        self._timer = QTimer(self)
-        self._timer.setInterval(16)
-        self._timer.timeout.connect(self._tick)
+        self.line = LineCLoading(self)
+        self.label = QLabel(self._text, self)
+        self.label.setObjectName("InstallStatus")
+        self.label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._effect = QGraphicsOpacityEffect(self)
+        self._effect.setOpacity(0.0)
+        self.setGraphicsEffect(self._effect)
+        self._fade = QPropertyAnimation(self._effect, b"opacity", self)
+        self._fade.setEasingCurve(QEasingCurve.Type.InOutCubic)
+        self._fade.finished.connect(self._on_fade_finished)
+        self._hiding = False
+
+    # ---------------------------------------------------------------- public
+    def is_loading(self) -> bool:
+        return self.isVisible() and not self._hiding
 
     def show_loading(self, text: str = "正在加载…") -> None:
+        if not anim.loading_enabled():
+            self._hide_now()
+            return
         self._text = text
+        self.label.setText(text)
+        self._layout_children()
+        self._hiding = False
         self.setVisible(True)
         self.raise_()
-        if not self._timer.isActive():
-            self._timer.start()
+        self._fade.stop()
+        self._effect.setOpacity(0.0)
+        self._fade.setDuration(anim.ms(FADE_IN_MS))
+        self._fade.setStartValue(0.0)
+        self._fade.setEndValue(1.0)
+        self._fade.start()
 
     def stop(self) -> None:
-        self._timer.stop()
-        self.setVisible(False)
+        """Idempotent: repeated calls never queue a second fade or hide."""
+        if self._hiding or not self.isVisible():
+            return
+        self._hiding = True
+        self._fade.stop()
+        self._fade.setDuration(anim.ms(FADE_OUT_MS))
+        self._fade.setStartValue(self._effect.opacity())
+        self._fade.setEndValue(0.0)
+        self._fade.start()
 
-    def _tick(self) -> None:
-        speed = anim.speed()
-        self._angle = (self._angle + 3.2 * speed) % 360.0
-        self._phase += 0.11 * speed
-        self.update()
+    # --------------------------------------------------------------- private
+    def _on_fade_finished(self) -> None:
+        if self._hiding:
+            self._hide_now()
+
+    def _hide_now(self) -> None:
+        self._hiding = False
+        self._fade.stop()
+        self._effect.setOpacity(0.0)
+        self.setVisible(False)
+        self.line.stop()
+
+    def _layout_children(self) -> None:
+        self.line.setFixedSize(120, 150)
+        self.line.move((self.width() - 120) // 2, (self.height() - 190) // 2)
+        self.label.setGeometry(0, self.height() // 2 + 56, self.width(), 26)
+
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        self._layout_children()
 
     def paintEvent(self, event) -> None:  # noqa: N802
-        palette = theme.colors()
         painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         painter.fillRect(self.rect(), QColor(0, 0, 0, 55))
-        size = 40.0
-        bounce = -abs(math.sin(self._phase)) * 8.0
-        center = QPointF(self.width() / 2.0, self.height() / 2.0 - 12 + bounce)
-        painter.save()
-        painter.translate(center)
-        painter.rotate(self._angle)
-        pen = QPen(QColor("#4f8cff"))
-        pen.setWidthF(2.0)
-        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-        painter.setPen(pen)
-        painter.setBrush(Qt.BrushStyle.NoBrush)
-        painter.drawArc(
-            QRectF(-size / 2, -size / 2, size, size),
-            int(42 * 16),
-            int(276 * 16),
-        )
-        painter.restore()
-        painter.setPen(QColor(palette["text"]))
-        painter.drawText(
-            QRectF(0, self.height() / 2 + 42, self.width(), 24),
-            Qt.AlignmentFlag.AlignCenter,
-            self._text,
-        )
         painter.end()

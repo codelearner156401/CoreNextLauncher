@@ -11,6 +11,7 @@ MAX_SPEED = 2.5
 DEFAULT_SPEED = 1.0
 
 _speed = DEFAULT_SPEED
+_loading = True
 
 
 def clamp(value: float) -> float:
@@ -31,6 +32,15 @@ def set_speed(value: float) -> float:
 
 def speed() -> float:
     return _speed
+
+
+def set_loading_enabled(enabled: bool) -> None:
+    global _loading
+    _loading = bool(enabled)
+
+
+def loading_enabled() -> bool:
+    return _loading
 
 
 def ms(base_ms: int) -> int:

@@ -23,8 +23,14 @@ TAG_COLORS = {
 
 
 class VersionCardDelegate(QStyledItemDelegate):
+    CARD_HEIGHT = 64
+    FALLBACK_WIDTH = 320
+
     def sizeHint(self, option: QStyleOptionViewItem, index) -> QSize:  # noqa: N802
-        return QSize(option.rect.width(), 64)
+        # option.rect is not always filled in when Qt asks for the hint; a zero
+        # width would then be cached as the uniform item size.
+        width = option.rect.width()
+        return QSize(width if width > 0 else self.FALLBACK_WIDTH, self.CARD_HEIGHT)
 
     def paint(self, painter: QPainter, option: QStyleOptionViewItem, index) -> None:  # noqa: N802
         entry = index.data(Qt.ItemDataRole.UserRole)

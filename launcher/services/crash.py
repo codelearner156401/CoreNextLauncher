@@ -14,6 +14,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 MAX_READ = 4 * 1024 * 1024
+# Share of U+FFFD a UTF-8 decode may leave before we treat the file as another
+# encoding: one or two corrupted bytes in a long log stay far below 0.5%, while
+# a GBK file turns a whole run of Chinese characters into replacement noise.
+UTF8_REPLACEMENT_RATIO = 0.005
 
 
 @dataclass(frozen=True)
@@ -336,21 +340,57 @@ _SUSPECT_RE = re.compile(
 _MOD_ID_RE = re.compile(r"Mod ID:\s*([\w.-]+)", re.IGNORECASE)
 _XMX_RE = re.compile(r"-Xmx(\d+)([kKmMgG]?)", re.IGNORECASE)
 _XMS_RE = re.compile(r"-Xms(\d+)([kKmMgG]?)", re.IGNORECASE)
-_FABRIC_MODS_RE = re.compile(r"Fabric Mods:\s*\n((?:\s+\S+.*\n)+)", re.IGNORECASE)
+_FABRIC_MODS_RE = re.compile(r"Fabric Mods:[ \t]*\n((?:[ \t]+\S[^\n]*\n?)+)", re.IGNORECASE)
+# A line of that block reads "\t\tfabric-api: Fabric API 0.83.0"; the id sits
+# before the colon, so a stack frame such as "\tat foo.bar(Baz.java:42)" never
+# matches it.
+_FABRIC_MOD_LINE_RE = re.compile(r"^[ \t]+(\S+?):\s")
 
 
 def _read_text(path: Path) -> str:
+    start = 0
     try:
         size = path.stat().st_size
         with open(path, "rb") as handle:
             # Crash reports are small; huge latest.log files keep the error at
             # the end, so read the tail instead of the first megabytes.
             if size > MAX_READ:
-                handle.seek(size - MAX_READ)
+                start = size - MAX_READ
+                handle.seek(start)
             data = handle.read(MAX_READ)
     except OSError:
         return ""
-    return data.decode("utf-8", "replace")
+    if start:
+        # A tail read can begin inside a multi-byte character or in the middle
+        # of a line; dropping that partial first line (or, for a single huge
+        # line, the broken leading bytes) keeps the strict decodes below from
+        # mis-detecting the encoding.
+        newline = data.find(b"\n")
+        if 0 <= newline < 4096:
+            data = data[newline + 1 :]
+        else:
+            trimmed = 0
+            while trimmed < 4 and data[:1] and data[0] & 0xC0 == 0x80:
+                data = data[1:]
+                trimmed += 1
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError:
+        replaced = data.decode("utf-8", "replace")
+    if replaced.count("\ufffd") / max(1, len(replaced)) <= UTF8_REPLACEMENT_RATIO:
+        return replaced
+    try:
+        return data.decode("gbk")
+    except UnicodeDecodeError:
+        return replaced
+
+
+def _safe_mtime(path: Path) -> float:
+    """Modification time of *path*, or 0.0 when it cannot be read."""
+    try:
+        return path.stat().st_mtime
+    except OSError:
+        return 0.0
 
 
 def latest_crash_report(game_dir: str | Path) -> Path | None:
@@ -366,7 +406,7 @@ def latest_crash_report(game_dir: str | Path) -> Path | None:
         return None
     if not candidates:
         return None
-    return max(candidates, key=lambda p: p.stat().st_mtime if p.exists() else 0)
+    return max(candidates, key=_safe_mtime)
 
 
 def latest_jvm_crash(game_dir: str | Path) -> Path | None:
@@ -377,7 +417,7 @@ def latest_jvm_crash(game_dir: str | Path) -> Path | None:
         return None
     if not candidates:
         return None
-    return max(candidates, key=lambda p: p.stat().st_mtime if p.exists() else 0)
+    return max(candidates, key=_safe_mtime)
 
 
 def _human_xmx(text: str) -> str:
@@ -422,9 +462,13 @@ def _extract_suspects(text: str) -> list[str]:
     fabric = _FABRIC_MODS_RE.search(text)
     if fabric:
         for line in fabric.group(1).splitlines()[:12]:
-            parts = line.strip().split()
-            if parts and re.fullmatch(r"[\w.-]+", parts[0]):
-                suspects.append(parts[0])
+            stripped = line.strip()
+            # Stack frames and "... 12 more" lines are not mods.
+            if not stripped or stripped.startswith("at ") or re.match(r"\.\.\.\s*\d+\s+more", stripped):
+                continue
+            mod_line = _FABRIC_MOD_LINE_RE.match(line)
+            if mod_line:
+                suspects.append(mod_line.group(1))
     seen: set[str] = set()
     unique: list[str] = []
     for name in suspects:

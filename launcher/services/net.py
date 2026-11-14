@@ -20,7 +20,7 @@ import urllib.request
 from pathlib import Path
 from typing import Any, Callable
 
-USER_AGENT = "CoreNextLauncher/1.9.2 (Windows; Minecraft launcher)"
+USER_AGENT = "CoreNextLauncher/1.9.4 (Windows; Minecraft launcher)"
 DEFAULT_TIMEOUT = 30.0
 DEFAULT_RETRIES = 3
 CHUNK = 256 * 1024
@@ -189,30 +189,44 @@ def download(
     dest = Path(dest)
     dest.parent.mkdir(parents=True, exist_ok=True)
     temp = dest.with_name(dest.name + ".part")
-    sha1 = hashlib.sha1()
-    sha256 = hashlib.sha256()
-    sha512 = hashlib.sha512()
+    attempts = max(1, DEFAULT_RETRIES)
     done = 0
-    last_report = 0.0
+    total = 0
     try:
-        with open_url(url, timeout=timeout) as response:
-            total = int(response.headers.get("Content-Length") or expected_size or 0)
-            with open(temp, "wb") as handle:
-                while True:
-                    if cancel is not None and cancel():
-                        raise NetworkError("下载已取消")
-                    block = response.read(CHUNK)
-                    if not block:
-                        break
-                    handle.write(block)
-                    sha1.update(block)
-                    sha256.update(block)
-                    sha512.update(block)
-                    done += len(block)
-                    now = time.monotonic()
-                    if progress is not None and (now - last_report > 0.06 or done == total):
-                        last_report = now
-                        progress(done, total)
+        for attempt in range(attempts):
+            sha1 = hashlib.sha1()
+            sha256 = hashlib.sha256()
+            sha512 = hashlib.sha512()
+            done = 0
+            last_report = 0.0
+            try:
+                with open_url(url, timeout=timeout) as response:
+                    total = int(response.headers.get("Content-Length") or expected_size or 0)
+                    with open(temp, "wb") as handle:
+                        while True:
+                            if cancel is not None and cancel():
+                                raise NetworkError("下载已取消")
+                            block = response.read(CHUNK)
+                            if not block:
+                                break
+                            handle.write(block)
+                            sha1.update(block)
+                            sha256.update(block)
+                            sha512.update(block)
+                            done += len(block)
+                            now = time.monotonic()
+                            if progress is not None and (now - last_report > 0.06 or done == total):
+                                last_report = now
+                                progress(done, total)
+                break
+            except NetworkError:
+                raise
+            except (http.client.HTTPException, OSError) as exc:
+                # A body that dies mid-stream (IncompleteRead, timeout, reset)
+                # is retried from scratch: the .part file is truncated again.
+                if attempt + 1 >= attempts:
+                    raise NetworkError(f"下载中断，已重试 {attempts} 次仍失败：{exc}") from exc
+                time.sleep(_retry_delay(attempt))
         if expected_size is not None and done != int(expected_size):
             raise NetworkError(f"文件大小不匹配：期望 {expected_size} 字节，实际 {done} 字节")
         if expected_sha1 and sha1.hexdigest().lower() != expected_sha1.lower():
@@ -222,7 +236,7 @@ def download(
         if expected_sha512 and sha512.hexdigest().lower() != expected_sha512.lower():
             raise NetworkError("SHA512 校验失败，文件可能已损坏，请重试")
         if progress is not None:
-            progress(done, done)
+            progress(done, total or done)
         os.replace(temp, dest)
         return dest
     except Exception:

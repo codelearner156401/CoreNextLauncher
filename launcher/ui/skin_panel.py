@@ -1,13 +1,12 @@
-"""Embedded skin panel with a pseudo-3D rotating Steve/Alex preview."""
+"""Embedded skin panel with a flat 2D paper-doll skin preview."""
 
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass
 from pathlib import Path
 
-from PySide6.QtCore import QPointF, QRectF, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QImage, QPainter, QPainterPath, QPen, QPolygonF, QTransform
+from PySide6.QtCore import QRect, QRectF, QSize, Qt, Signal
+from PySide6.QtGui import QColor, QImage, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QComboBox,
     QFileDialog,
@@ -28,220 +27,173 @@ from ..services import skins
 from .tasks import start_task
 
 
+# 64x64 皮肤的正面 UV（1 单位 = 1 皮肤像素）：
+#   头 (8,8) 8x8 · 身体 (20,20) 8x12 · 右臂 (44,20) w x 12 · 左臂 (36,52) w x 12
+#   右腿 (4,20) 4x12 · 左腿 (20,52) 4x12
+# 其中 w 为手臂宽度：经典 Steve 4px，纤细 Alex 3px。
+HEAD_SIZE = 8
+BODY_HEIGHT = 12
+LEG_HEIGHT = 12
+DOLL_HEIGHT = HEAD_SIZE + BODY_HEIGHT + LEG_HEIGHT
+ARM_COLUMN_X = 54
+ARM_COLUMN_ROWS = (20, 31)
+# 纸娃娃与圆角卡片边框之间留一点空白，避免脚底压住边框。
+PREVIEW_PADDING = 8
+
+
+def _is_slim(image: QImage) -> bool:
+    """Detect the 3px (slim / Alex) arm layout.
+
+    判据：经典 4px 手臂区域的第 4 列（皮肤坐标 x=54）整列全透明即视为 slim。
+    Steve 贴图用满 4 列实体像素，x=54 上有颜色；Alex 只用 3 列，第 4 列留空被
+    透明像素填满。与 skinview3d 的 (54, 20) 单点判据同源，这里扫满手臂列高，
+    避免单点噪点或压缩残留把模型判反。
+    """
+    if image.isNull() or image.width() < 64 or image.height() < ARM_COLUMN_ROWS[1] + 1:
+        return False
+    return all(
+        image.pixelColor(ARM_COLUMN_X, y).alpha() == 0
+        for y in range(ARM_COLUMN_ROWS[0], ARM_COLUMN_ROWS[1] + 1)
+    )
+
+
 @dataclass(frozen=True)
-class Box:
-    cx: float
-    cy: float
-    cz: float
-    sx: float
-    sy: float
-    sz: float
-    texture: str
+class Part:
+    """One textured body part placed on the doll canvas (unit = 1 skin pixel)."""
+
+    name: str
+    source: tuple[int, int, int, int]
+    x: int
+    y: int
 
 
-LEFT_ARM = "left_arm"
-RIGHT_ARM = "right_arm"
-LEFT_LEG = "left_leg"
-RIGHT_LEG = "right_leg"
+def _layout(arm_width: int) -> tuple[int, list[Part]]:
+    """Return the doll canvas width and the front-view part placement."""
+    body_x = arm_width
+    return 2 * arm_width + HEAD_SIZE, [
+        # 头在上、身体居中、腿在下，手臂挂在身体两侧（头顶对齐画布顶部）。
+        Part("head", (8, 8, HEAD_SIZE, HEAD_SIZE), body_x, 0),
+        Part("body", (20, 20, HEAD_SIZE, BODY_HEIGHT), body_x, HEAD_SIZE),
+        # 正面视角：角色右手臂在画面左侧（皮肤 x=44 起），左手臂在画面右侧（x=36 起）。
+        Part("right_arm", (44, 20, arm_width, BODY_HEIGHT), 0, HEAD_SIZE),
+        Part("left_arm", (36, 52, arm_width, BODY_HEIGHT), body_x + HEAD_SIZE, HEAD_SIZE),
+        # 双腿接在身体正下方：右腿占左半，左腿占右半。
+        Part("right_leg", (4, 20, 4, LEG_HEIGHT), body_x, HEAD_SIZE + BODY_HEIGHT),
+        Part("left_leg", (20, 52, 4, LEG_HEIGHT), body_x + 4, HEAD_SIZE + BODY_HEIGHT),
+    ]
 
 
 class SkinPreview(QWidget):
-    """A small rotating box-model renderer (no OpenGL dependency)."""
+    """Flat 2D paper-doll preview; the doll is cut and cached once per skin."""
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.setMinimumSize(210, 270)
-        self.setCursor(Qt.CursorShape.OpenHandCursor)
         self._image = QImage()
         self._model = "steve"
-        self._yaw = -24.0
-        self._pitch = 7.0
-        self._drag = None
-        self._timer = QTimer(self)
-        self._timer.setInterval(45)
-        self._timer.timeout.connect(self._tick)
-        self._timer.start()
+        self._doll = QPixmap()
+        self._scaled = QPixmap()
+        self._scaled_key: tuple[int, int] = (0, 0)
+        self._draw_rect = QRect()
+        self._draw_scale = 0.0
+
+    @property
+    def model(self) -> str:
+        return self._model
+
+    @property
+    def draw_rect(self) -> QRect:
+        """The rectangle the doll was last painted into."""
+        return QRect(self._draw_rect)
+
+    @property
+    def draw_scale(self) -> float:
+        return self._draw_scale
 
     def set_skin(self, image: QImage, model: str = "steve") -> None:
-        self._image = image
-        self._model = model if model in ("steve", "alex") else "steve"
-        self.update()
+        self._image = image if isinstance(image, QImage) else QImage()
+        self._resolve_model(model)
+        self._rebuild()
 
     def set_model(self, model: str) -> None:
-        self._model = model if model in ("steve", "alex") else "steve"
+        self._resolve_model(model)
+        self._rebuild()
+
+    def _resolve_model(self, model: str) -> None:
+        if model in ("steve", "alex"):
+            self._model = model
+        else:
+            # "auto" 或未知值：交给 x=54 列判据决定粗细手臂。
+            self._model = "alex" if _is_slim(self._image) else "steve"
+
+    def _rebuild(self) -> None:
+        """Cut the six parts out of the texture once and cache the doll pixmap."""
+        self._doll = QPixmap()
+        self._scaled = QPixmap()
+        self._scaled_key = (0, 0)
+        if self._image.isNull() or self._image.width() < 64 or self._image.height() < 32:
+            self.update()
+            return
+        texture = self._image.convertToFormat(QImage.Format.Format_ARGB32)
+        canvas_width, parts = _layout(3 if self._model == "alex" else 4)
+        doll = QPixmap(canvas_width, DOLL_HEIGHT)
+        doll.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(doll)
+        for part in parts:
+            x, y, w, h = part.source
+            if x + w > texture.width() or y + h > texture.height():
+                continue
+            painter.drawImage(part.x, part.y, texture.copy(x, y, w, h))
+        painter.end()
+        self._doll = doll
         self.update()
 
-    def _tick(self) -> None:
-        if self._drag is None:
-            self._yaw = (self._yaw + 0.45) % 360.0
-            self.update()
-
-    def mousePressEvent(self, event) -> None:  # noqa: N802
-        if event.button() == Qt.MouseButton.LeftButton:
-            self._drag = event.position()
-            self.setCursor(Qt.CursorShape.ClosedHandCursor)
-            event.accept()
-
-    def mouseMoveEvent(self, event) -> None:  # noqa: N802
-        if self._drag is not None:
-            delta = event.position() - self._drag
-            self._yaw = (self._yaw + delta.x() * 0.6) % 360.0
-            self._pitch = max(-35.0, min(35.0, self._pitch + delta.y() * 0.3))
-            self._drag = event.position()
-            self.update()
-            event.accept()
-
-    def mouseReleaseEvent(self, event) -> None:  # noqa: N802
-        self._drag = None
-        self.setCursor(Qt.CursorShape.OpenHandCursor)
-        event.accept()
-
-    def _project(self, point: tuple[float, float, float], scale: float) -> tuple[float, float, float]:
-        x, y, z = point
-        y -= 16.0
-        yaw = math.radians(self._yaw)
-        pitch = math.radians(self._pitch)
-        x1 = x * math.cos(yaw) + z * math.sin(yaw)
-        z1 = -x * math.sin(yaw) + z * math.cos(yaw)
-        y2 = y * math.cos(pitch) - z1 * math.sin(pitch)
-        z2 = y * math.sin(pitch) + z1 * math.cos(pitch)
-        return (
-            self.width() / 2 + x1 * scale,
-            self.height() / 2 - y2 * scale + z2 * scale * 0.18,
-            z2,
+    def _target_size(self) -> QSize:
+        """Fit the doll with one scale factor for both axes (aspect locked)."""
+        available_w = max(1, self.width() - 2 * PREVIEW_PADDING)
+        available_h = max(1, self.height() - 2 * PREVIEW_PADDING)
+        scale = min(available_w / self._doll.width(), available_h / self._doll.height())
+        self._draw_scale = scale
+        return QSize(
+            max(1, int(self._doll.width() * scale)),
+            max(1, int(self._doll.height() * scale)),
         )
 
-    @staticmethod
-    def _face_rect(part: str, face: str, model: str) -> tuple[int, int, int, int]:
-        slim = model == "alex"
-        w = 3 if slim else 4
-        if part == "head":
-            return {
-                "front": (8, 8, 8, 8), "back": (24, 8, 8, 8),
-                "right": (0, 8, 8, 8), "left": (16, 8, 8, 8),
-                "top": (8, 0, 8, 8), "bottom": (16, 0, 8, 8),
-            }[face]
-        if part == "body":
-            return {
-                "front": (20, 20, 8, 12), "back": (32, 20, 8, 12),
-                "right": (16, 20, 4, 12), "left": (28, 20, 4, 12),
-                "top": (20, 16, 8, 4), "bottom": (28, 16, 8, 4),
-            }[face]
-        if part == RIGHT_ARM:
-            return {
-                "front": (44, 20, w, 12), "back": (44 + w, 20, w, 12),
-                "right": (40, 20, 4, 12), "left": (48, 20, 4, 12),
-                "top": (44, 16, w, 4), "bottom": (48, 16, w, 4),
-            }[face]
-        if part == LEFT_ARM:
-            return {
-                "front": (36, 52, w, 12), "back": (36 + w, 52, w, 12),
-                "right": (32, 52, 4, 12), "left": (40, 52, 4, 12),
-                "top": (36, 48, w, 4), "bottom": (40, 48, w, 4),
-            }[face]
-        if part == RIGHT_LEG:
-            return {
-                "front": (4, 20, 4, 12), "back": (12, 20, 4, 12),
-                "right": (0, 20, 4, 12), "left": (8, 20, 4, 12),
-                "top": (4, 16, 4, 4), "bottom": (8, 16, 4, 4),
-            }[face]
-        return {
-            "front": (20, 52, 4, 12), "back": (28, 52, 4, 12),
-            "right": (16, 52, 4, 12), "left": (24, 52, 4, 12),
-            "top": (20, 48, 4, 4), "bottom": (24, 48, 4, 4),
-        }[face]
-
-    @staticmethod
-    def _average(image: QImage, rect: tuple[int, int, int, int]) -> QColor:
-        x0, y0, w, h = rect
-        r = g = b = a = 0
-        count = 0
-        for x in range(x0, min(image.width(), x0 + w)):
-            for y in range(y0, min(image.height(), y0 + h)):
-                c = image.pixelColor(x, y)
-                if c.alpha() == 0:
-                    continue
-                r += c.red(); g += c.green(); b += c.blue(); a += c.alpha()
-                count += 1
-        if not count:
-            return QColor(60, 70, 90)
-        return QColor(r // count, g // count, b // count, max(120, a // count))
-
-    def _boxes(self) -> list[Box]:
-        return [
-            Box(0, 28, 0, 8, 8, 8, "head"),
-            Box(0, 18, 0, 8, 12, 4, "body"),
-            Box(-6 if self._model == "alex" else -6, 18, 0, 3 if self._model == "alex" else 4, 12, 4, LEFT_ARM),
-            Box(6, 18, 0, 3 if self._model == "alex" else 4, 12, 4, RIGHT_ARM),
-            Box(-2, 6, 0, 4, 12, 4, LEFT_LEG),
-            Box(2, 6, 0, 4, 12, 4, RIGHT_LEG),
-        ]
+    def _scaled_doll(self, size: QSize) -> QPixmap:
+        key = (size.width(), size.height())
+        if self._scaled_key != key:
+            # 像素画必须最近邻缩放，否则 8 倍放大后边缘发糊、比例走形。
+            self._scaled = self._doll.scaled(
+                size,
+                Qt.AspectRatioMode.IgnoreAspectRatio,
+                Qt.TransformationMode.FastTransformation,
+            )
+            self._scaled_key = key
+        return self._scaled
 
     def paintEvent(self, event) -> None:  # noqa: N802
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
         palette = theme.colors()
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(QColor(palette["card"]))
         painter.drawRoundedRect(QRectF(self.rect()).adjusted(1, 1, -1, -1), 16, 16)
-        if self._image.isNull():
+        if self._doll.isNull():
+            self._draw_rect = QRect()
+            self._draw_scale = 0.0
             painter.setPen(QColor(palette["muted"]))
             painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, "导入皮肤后预览")
+            painter.end()
             return
-        scale = min(self.width() / 42.0, self.height() / 44.0)
-        shadow = QRectF(self.width() / 2 - 36, self.height() * 0.80, 72, 14)
-        painter.setBrush(QColor(0, 0, 0, 55))
-        painter.drawEllipse(shadow)
-
-        faces = []
-        for box in self._boxes():
-            hx, hy, hz = box.sx / 2, box.sy / 2, box.sz / 2
-            corners = {
-                "front": [(box.cx - hx, box.cy - hy, box.cz + hz), (box.cx + hx, box.cy - hy, box.cz + hz),
-                          (box.cx + hx, box.cy + hy, box.cz + hz), (box.cx - hx, box.cy + hy, box.cz + hz)],
-                "back": [(box.cx + hx, box.cy - hy, box.cz - hz), (box.cx - hx, box.cy - hy, box.cz - hz),
-                         (box.cx - hx, box.cy + hy, box.cz - hz), (box.cx + hx, box.cy + hy, box.cz - hz)],
-                "right": [(box.cx + hx, box.cy - hy, box.cz + hz), (box.cx + hx, box.cy - hy, box.cz - hz),
-                          (box.cx + hx, box.cy + hy, box.cz - hz), (box.cx + hx, box.cy + hy, box.cz + hz)],
-                "left": [(box.cx - hx, box.cy - hy, box.cz - hz), (box.cx - hx, box.cy - hy, box.cz + hz),
-                         (box.cx - hx, box.cy + hy, box.cz + hz), (box.cx - hx, box.cy + hy, box.cz - hz)],
-                "top": [(box.cx - hx, box.cy + hy, box.cz + hz), (box.cx + hx, box.cy + hy, box.cz + hz),
-                        (box.cx + hx, box.cy + hy, box.cz - hz), (box.cx - hx, box.cy + hy, box.cz - hz)],
-                "bottom": [(box.cx - hx, box.cy - hy, box.cz - hz), (box.cx + hx, box.cy - hy, box.cz - hz),
-                           (box.cx + hx, box.cy - hy, box.cz + hz), (box.cx - hx, box.cy - hy, box.cz + hz)],
-            }
-            for face, pts in corners.items():
-                projected = [self._project(p, scale) for p in pts]
-                depth = sum(p[2] for p in projected) / 4.0
-                faces.append((depth, box.texture, face, projected))
-        faces.sort(key=lambda row: row[0])
-
-        for _depth, part, face, pts in faces:
-            polygon = QPolygonF([QPointF(p[0], p[1]) for p in pts])
-            tex = self._face_rect(part, face, self._model)
-            color = self._average(self._image, tex)
-            path = QPainterPath()
-            path.addPolygon(polygon)
-            path.closeSubpath()
-            painter.save()
-            painter.setClipPath(path)
-            source = QPolygonF([
-                QPointF(tex[0], tex[1]),
-                QPointF(tex[0] + tex[2], tex[1]),
-                QPointF(tex[0] + tex[2], tex[1] + tex[3]),
-                QPointF(tex[0], tex[1] + tex[3]),
-            ])
-            transform = QTransform()
-            if QTransform.quadToQuad(source, polygon, transform):
-                painter.setTransform(transform, True)
-                painter.drawImage(0, 0, self._image)
-            else:
-                painter.fillPath(path, color)
-            painter.restore()
-            painter.setPen(QPen(QColor(0, 0, 0, 55), 0.7))
-            painter.setBrush(Qt.BrushStyle.NoBrush)
-            painter.drawPolygon(polygon)
+        scaled = self._scaled_doll(self._target_size())
+        self._draw_rect = QRect(
+            (self.width() - scaled.width()) // 2,
+            (self.height() - scaled.height()) // 2,
+            scaled.width(),
+            scaled.height(),
+        )
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, False)
+        painter.drawPixmap(self._draw_rect.topLeft(), scaled)
         painter.end()
 
 
@@ -307,6 +259,10 @@ class SkinPanel(QFrame):
         self.official_button.setObjectName("Ghost")
         self.official_button.clicked.connect(self._fetch_official)
         buttons.addWidget(self.official_button)
+        self.export_button = QPushButton("导出 PNG")
+        self.export_button.setObjectName("Ghost")
+        self.export_button.clicked.connect(self._export)
+        buttons.addWidget(self.export_button)
         self.delete_button = QPushButton("删除")
         self.delete_button.setObjectName("DangerGhost")
         self.delete_button.clicked.connect(self._delete)
@@ -317,7 +273,7 @@ class SkinPanel(QFrame):
         body.addLayout(right, 1)
         layout.addLayout(body)
 
-        hint = QLabel("支持 64×64 / 64×32 PNG，自动识别 Steve / Alex；拖拽预览可旋转模型。")
+        hint = QLabel("支持 64×64 / 64×32 PNG，按标准 UV 裁切 2D 纸娃娃正面图；手臂第 4 列（x=54）全透明时自动判定为 Alex 细手臂。")
         hint.setObjectName("Hint")
         hint.setWordWrap(True)
         layout.addWidget(hint)
@@ -420,6 +376,22 @@ class SkinPanel(QFrame):
         self.source_label.setText("拉取失败")
         QMessageBox.warning(self, "拉取皮肤失败", message)
 
+    def _export(self) -> None:
+        if self._current is None:
+            return
+        from ..paths import exports_dir
+        import shutil, time
+
+        target_dir = exports_dir()
+        target_dir.mkdir(parents=True, exist_ok=True)
+        target = target_dir / f"{self._current.name}-{time.strftime('%Y%m%d-%H%M%S')}.png"
+        try:
+            shutil.copy2(self._current.path, target)
+        except OSError as exc:
+            QMessageBox.warning(self, "导出失败", str(exc))
+            return
+        self.log_requested.emit("success", f"皮肤已导出：{target}")
+
     def _delete(self) -> None:
         if self._current is None:
             return
@@ -436,4 +408,3 @@ class SkinPanel(QFrame):
         self._current = None
         self.refresh()
         self.log_requested.emit("info", "已删除本地皮肤。")
-

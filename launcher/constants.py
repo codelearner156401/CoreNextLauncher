@@ -7,7 +7,7 @@ own Azure application registration in launcher_config.json
 """
 
 APP_NAME = "CoreNextLauncher"
-APP_VERSION = "1.9.2"
+APP_VERSION = "1.9.9"
 
 DEFAULT_MS_CLIENT_ID = "c36a9fb6-4f2a-41ff-90bd-ae7cc92031eb"
 
@@ -32,4 +32,4 @@ DEFAULT_AI_ENDPOINT = DEEPSEEK_API + "/chat/completions"
 
 # Optional: "owner/repo" of the GitHub repository that publishes releases.
 # When empty the launcher shows how to configure it instead of polling.
-DEFAULT_UPDATE_REPO = ""
+DEFAULT_UPDATE_REPO = "Codelearner156401/CoreNextLauncher"

@@ -1,14 +1,25 @@
-"""Startup splash / loading animation (rotating bouncing C or custom image)."""
+"""Startup splash: the shared C-ring animation plus a soft fade in and out.
+
+The splash owns no animation driver of its own - LineCLoading runs the single
+rotation/bounce timeline, so the old 16 ms QTimer that recomputed the angle is
+gone.  finish() fades the window out before closing it, which removes the hard
+cut that used to flash the splash on top of the freshly built main window.
+"""
 
 from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import QPointF, QRectF, Qt, QTimer
-from PySide6.QtGui import QColor, QFont, QLinearGradient, QPainter, QPainterPath, QPen, QPixmap
-from PySide6.QtWidgets import QApplication, QWidget
+from PySide6.QtCore import QEasingCurve, QPropertyAnimation, QRectF, QSize, Qt, QTimer
+from PySide6.QtGui import QColor, QFont, QLinearGradient, QPainter, QPainterPath, QPixmap
+from PySide6.QtWidgets import QApplication, QGraphicsOpacityEffect, QWidget
 
 from .. import APP_NAME, anim, theme
+from .loading_widget import LineCLoading
+
+FADE_IN_MS = 220
+FADE_OUT_MS = 260
+DOTS_INTERVAL_MS = 420
 
 
 class LoadingSplash(QWidget):
@@ -31,24 +42,88 @@ class LoadingSplash(QWidget):
         self._accent = str(self._profile.get("accent") or "#7b5cff")
         splash = str(self._profile.get("splash") or "")
         self._image = QPixmap(splash) if splash and Path(splash).is_file() else QPixmap()
+
+        self.line = LineCLoading(self)
+        self.line.setFixedSize(120, 150)
+        self.line.move((self.width() - 120) // 2, 18)
+        self.line.setVisible(self._image.isNull() and anim.loading_enabled())
+
         screen = QApplication.primaryScreen()
         if screen is not None:
             geo = screen.availableGeometry()
             self.move(geo.center() - self.rect().center())
-        self._angle = 0.0
-        self._phase = 0.0
-        self._timer = QTimer(self)
-        self._timer.setInterval(16)
-        self._timer.timeout.connect(self._tick)
-        if self._image.isNull():
-            self._timer.start()
 
-    def _tick(self) -> None:
-        speed = anim.speed()
-        self._angle = (self._angle + 3.2 * speed) % 360.0
-        self._phase += 0.11 * speed
+        self._dots = 1
+        self._dots_timer = QTimer(self)
+        self._dots_timer.setInterval(DOTS_INTERVAL_MS)
+        self._dots_timer.timeout.connect(self._tick_dots)
+
+        self._closing = False
+        self._effect = QGraphicsOpacityEffect(self)
+        self._effect.setOpacity(0.0)
+        self.setGraphicsEffect(self._effect)
+        self._fade = QPropertyAnimation(self._effect, b"opacity", self)
+        self._fade.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self._fade.finished.connect(self._on_fade_finished)
+
+    # --------------------------------------------------------------- ticking
+    def _tick_dots(self) -> None:
+        self._dots = self._dots % 3 + 1
         self.update()
 
+    # ---------------------------------------------------------------- fades
+    def fade_in(self) -> None:
+        self._fade.stop()
+        self._effect.setOpacity(0.0)
+        self._fade.setDuration(anim.ms(FADE_IN_MS))
+        self._fade.setStartValue(0.0)
+        self._fade.setEndValue(1.0)
+        self._fade.start()
+        if not self._dots_timer.isActive():
+            self._dots_timer.start()
+
+    def finish(self, window: QWidget | None = None) -> None:
+        """Fade the splash out, then close it.  Safe to call more than once."""
+        if self._closing:
+            return
+        self._closing = True
+        self._dots_timer.stop()
+        if window is not None:
+            window.raise_()
+            window.activateWindow()
+        if not self.isVisible():
+            self._shutdown()
+            return
+        self._fade.stop()
+        self._fade.setDuration(anim.ms(FADE_OUT_MS))
+        self._fade.setStartValue(self._effect.opacity())
+        self._fade.setEndValue(0.0)
+        self._fade.start()
+
+    def _on_fade_finished(self) -> None:
+        if self._closing:
+            self._shutdown()
+
+    def _shutdown(self) -> None:
+        self._fade.stop()
+        self._dots_timer.stop()
+        self.line.stop()
+        self.setVisible(False)
+        self.close()
+
+    def showEvent(self, event) -> None:  # noqa: N802
+        super().showEvent(event)
+        if not self._closing:
+            self.fade_in()
+
+    def closeEvent(self, event) -> None:  # noqa: N802
+        self._closing = True
+        self._fade.stop()
+        self._dots_timer.stop()
+        self.line.stop()
+        super().closeEvent(event)
+
+    # -------------------------------------------------------------- painting
     def paintEvent(self, event) -> None:  # noqa: N802
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
@@ -60,14 +135,26 @@ class LoadingSplash(QWidget):
 
         if not self._image.isNull():
             image = self._image.toImage()
+            # The painter works in logical pixels, so the copy has to be made at
+            # device resolution and mapped back onto the logical target rect;
+            # scaling to self.size() would leave the widget's 2x device pixels
+            # to be upscaled by Qt on a HiDPI screen.
+            dpr = self.devicePixelRatioF() or 1.0
+            device = QSize(
+                max(1, round(self.width() * dpr)), max(1, round(self.height() * dpr))
+            )
             scaled = image.scaled(
-                self.size(),
+                device,
                 Qt.AspectRatioMode.KeepAspectRatioByExpanding,
                 Qt.TransformationMode.SmoothTransformation,
             )
-            x = max(0, (scaled.width() - self.width()) // 2)
-            y = max(0, (scaled.height() - self.height()) // 2)
-            painter.drawImage(0, 0, scaled.copy(x, y, self.width(), self.height()))
+            x = max(0, (scaled.width() - device.width()) // 2)
+            y = max(0, (scaled.height() - device.height()) // 2)
+            crop = scaled.copy(x, y, device.width(), device.height())
+            crop.setDevicePixelRatio(1.0)
+            # The target rect stays logical, so a 1x screen blits the copy 1:1 and
+            # a scaled screen maps the device-resolution copy onto the same area.
+            painter.drawImage(QRectF(0, 0, self.width(), self.height()), crop)
         else:
             colours = theme.colors(self._base)
             background = QLinearGradient(0, 0, self.width(), self.height())
@@ -78,27 +165,6 @@ class LoadingSplash(QWidget):
                 background.setColorAt(0.0, QColor("#070b12"))
                 background.setColorAt(1.0, QColor("#111827"))
             painter.fillRect(self.rect(), background)
-
-            # Small, single, very thin blue line C (no fill, no thick glow).
-            import math
-
-            size = 46.0
-            bounce = -abs(math.sin(self._phase)) * 9.0
-            center = QPointF(self.width() / 2.0, 102 + bounce)
-            painter.save()
-            painter.translate(center)
-            painter.rotate(self._angle)
-            pen = QPen(QColor("#4f8cff"))
-            pen.setWidthF(2.2)
-            pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-            painter.setPen(pen)
-            painter.setBrush(Qt.BrushStyle.NoBrush)
-            painter.drawArc(
-                QRectF(-size / 2, -size / 2, size, size),
-                int(42 * 16),
-                int(276 * 16),
-            )
-            painter.restore()
 
             painter.setPen(QColor(colours["text"]))
             title = QFont("Segoe UI")
@@ -119,11 +185,10 @@ class LoadingSplash(QWidget):
                 Qt.AlignmentFlag.AlignCenter,
                 "正在准备启动器…",
             )
-            dots = "." * (1 + int(self._phase * 1.5) % 3)
             painter.drawText(
                 QRectF(0, 224, self.width(), 22),
                 Qt.AlignmentFlag.AlignCenter,
-                dots,
+                "." * self._dots,
             )
 
         painter.setClipping(False)
@@ -132,20 +197,14 @@ class LoadingSplash(QWidget):
         painter.drawPath(path)
         painter.end()
 
-    def finish(self, window: QWidget) -> None:
-        self._timer.stop()
-        QTimer.singleShot(850, self.close)
-
 
 def create_splash(config) -> LoadingSplash | None:
     profiles = getattr(config, "theme_profiles", {}) or {}
     style = str(getattr(config, "ui_style", "liquid") or "liquid")
     profile = profiles.get(style, {}) if isinstance(profiles, dict) else {}
     splash = str(profile.get("splash") or "")
-    if not getattr(config, "loading_animation", True) and not splash:
-        return None
     if splash and not Path(splash).is_file():
         splash = ""
-    if not getattr(config, "loading_animation", True) and not splash:
+    if not anim.loading_enabled() and not splash:
         return None
     return LoadingSplash(config)

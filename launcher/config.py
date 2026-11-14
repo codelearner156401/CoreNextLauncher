@@ -58,10 +58,54 @@ _STYLE_DEFAULTS: dict[str, dict] = {
 }
 
 _HEX_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
+_DRIVE_RE = re.compile(r"^[A-Za-z]:")
 
 
 def _default_profile(style: str) -> dict:
     return dict(_STYLE_DEFAULTS.get(style, _STYLE_DEFAULTS["liquid"]))
+
+
+def _absolute_drive(value: str) -> str:
+    """Repair a bare or relative drive prefix: "D:" -> "D:\\", "D:MC" -> "D:\\MC".
+
+    pathlib treats a bare drive prefix as a *relative* path (Path("D:").is_absolute()
+    is False and str(Path("D:") / "MC") is "D:MC"), so the separator is restored here.
+    Other values pass through untouched.
+    """
+    if not _DRIVE_RE.match(value):
+        return value
+    rest = value[2:]
+    if rest[:1] in ("\\", "/"):
+        return value
+    return value[:2] + "\\" + rest
+
+
+def path_is_absolute(value: str) -> bool:
+    """True when value points at an absolute location (a bare "D:" counts)."""
+    text = os.path.expanduser(str(value or "").strip())
+    if not text:
+        return False
+    return Path(_absolute_drive(text)).is_absolute()
+
+
+def normalize_directory(value: str) -> str:
+    """Return value as an absolute path, or "" when it cannot be one.
+
+    strip + expanduser, then a bare/relative drive prefix is repaired
+    ("D:" -> "D:\\", "D:MC" -> "D:\\MC") and the result is resolved.  Relative and
+    empty input return "" so the caller can warn; nothing is created on disk and the
+    target is deliberately not required to exist.
+    """
+    text = os.path.expanduser(str(value or "").strip())
+    if not text:
+        return ""
+    candidate = _absolute_drive(text)
+    if not Path(candidate).is_absolute():
+        return ""
+    try:
+        return str(Path(candidate).resolve())
+    except OSError:
+        return ""
 
 
 @dataclass
@@ -93,6 +137,10 @@ class AppConfig:
     # --- JVM -----------------------------------------------------------
     jvm_preset: str = "auto"
     jvm_args: list[str] = field(default_factory=list)
+    # --- multiplayer / EasyTier ----------------------------------------
+    # Shared rendezvous nodes, one per line (or comma separated). An empty
+    # value means "use the built-in default nodes".
+    mp_peer_nodes: str = ""
 
     def normalized(self) -> "AppConfig":
         """Fill in a sensible default game directory."""
@@ -120,7 +168,7 @@ class AppConfig:
             self.backup_keep = max(1, min(30, int(self.backup_keep)))
         except (TypeError, ValueError):
             self.backup_keep = 5
-        if not isinstance(self.update_repo, str):
+        if not isinstance(self.update_repo, str) or not self.update_repo.strip():
             self.update_repo = DEFAULT_UPDATE_REPO
         self.update_repo = self.update_repo.strip().removeprefix("https://github.com/").strip("/")
         if not isinstance(self.ai_model, str) or not self.ai_model.strip():
@@ -129,6 +177,9 @@ class AppConfig:
         if self.jvm_preset not in PRESET_LABELS:
             self.jvm_preset = "auto"
         self.jvm_args = sanitize_args(self.jvm_args)
+        nodes = getattr(self, "mp_peer_nodes", "")
+        # Tolerate hand-edited/legacy files: only text can be a node list.
+        self.mp_peer_nodes = nodes.strip() if isinstance(nodes, str) else ""
 
         # --- v1.8 three UI styles with independent profiles ----------------
         self.animation_speed = anim.clamp(getattr(self, "animation_speed", 1.0))
@@ -175,17 +226,46 @@ class AppConfig:
         return asdict(self)
 
 
+def _normalize_loaded_paths(config: AppConfig) -> None:
+    """Repair drive-relative path values saved by older versions ("D:MC").
+
+    Only values normalize_directory() can turn into an absolute path are rewritten;
+    anything else (a relative path, a URL, an empty string) is left untouched.
+    """
+    for name in ("game_dir", "background_image"):
+        raw = getattr(config, name, "")
+        if isinstance(raw, str) and raw.strip():
+            fixed = normalize_directory(raw)
+            if fixed:
+                setattr(config, name, fixed)
+    profiles = config.theme_profiles if isinstance(config.theme_profiles, dict) else {}
+    for profile in profiles.values():
+        if not isinstance(profile, dict):
+            continue
+        for key in ("background", "splash"):
+            raw = profile.get(key)
+            if isinstance(raw, str) and raw.strip():
+                fixed = normalize_directory(raw)
+                if fixed:
+                    profile[key] = fixed
+
+
 def load_config(path: Path = CONFIG_PATH) -> AppConfig:
     config = AppConfig()
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
-        return config.normalized()
+        backup = path.with_suffix(path.suffix + ".bak")
+        try:
+            raw = json.loads(backup.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return config.normalized()
     if isinstance(raw, dict):
         known = {f.name for f in fields(AppConfig)}
         for key, value in raw.items():
             if key in known:
                 setattr(config, key, value)
+    _normalize_loaded_paths(config)
     return config.normalized()
 
 
@@ -194,4 +274,9 @@ def save_config(config: AppConfig, path: Path = CONFIG_PATH) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".tmp")
     tmp.write_text(payload + "\n", encoding="utf-8")
+    if path.is_file():
+        try:
+            os.replace(path, path.with_suffix(path.suffix + ".bak"))
+        except OSError:
+            pass
     os.replace(tmp, path)

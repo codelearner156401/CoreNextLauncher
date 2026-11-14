@@ -19,7 +19,8 @@ from PySide6.QtWidgets import (
 )
 
 from ...services import modpack
-from ...services.util import human_size
+from ...services.util import human_size, timestamp_slug
+from ..dialog_page import run_in_window
 from ..widgets import ShimmerProgressBar
 from .common import card, start_task
 
@@ -32,6 +33,8 @@ class ModpackTab(QWidget):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.game_dir: Path | None = None
+        self.current_version = ""
+        self._export_version_hint = ""
         self._pack: modpack.ModpackInfo | None = None
         self._busy = False
         self.setAcceptDrops(True)
@@ -71,6 +74,13 @@ class ModpackTab(QWidget):
         self.import_button.setEnabled(False)
         self.import_button.clicked.connect(self.start_import)
         button_row.addWidget(self.import_button)
+        self.export_button = QPushButton("导出整合包…")
+        self.export_button.setObjectName("Ghost")
+        self.export_button.setToolTip(
+            "把当前版本的 Mod、config 与 options.txt 打包成标准 .mrpack（不含存档和资源包）"
+        )
+        self.export_button.clicked.connect(self.start_export)
+        button_row.addWidget(self.export_button)
         button_row.addStretch(1)
         pick_layout.addLayout(button_row)
         layout.addWidget(pick_card)
@@ -118,6 +128,10 @@ class ModpackTab(QWidget):
     def set_game_dir(self, game_dir: str) -> None:
         self.game_dir = Path(game_dir) if game_dir else None
         self._refresh_base_hint()
+
+    def set_current_version(self, version_id: str) -> None:
+        """Remember the version selected in the version library (no UI rebuild)."""
+        self.current_version = str(version_id or "").strip()
 
     def choose_file(self) -> None:
         chosen, _ = QFileDialog.getOpenFileName(
@@ -222,6 +236,7 @@ class ModpackTab(QWidget):
     def _on_imported(self, result: modpack.ImportResult) -> None:
         self._busy = False
         self.import_button.setEnabled(True)
+        self.export_button.setEnabled(True)
         self.progress.set_shimmer(False)
         self.progress.setRange(0, 100)
         self.progress.setValue(100)
@@ -263,6 +278,7 @@ class ModpackTab(QWidget):
     def _on_failed(self, message: str) -> None:
         self._busy = False
         self.import_button.setEnabled(True)
+        self.export_button.setEnabled(True)
         self.progress.set_shimmer(False)
         self.progress.setRange(0, 100)
         self.progress.setValue(0)
@@ -272,6 +288,121 @@ class ModpackTab(QWidget):
         self._repolish(self.status)
         QMessageBox.warning(self, "整合包导入失败", message)
         self.log_requested.emit("error", f"整合包导入失败：{message}")
+
+    # -------------------------------------------------------------- export
+    def start_export(self) -> None:
+        if self._busy:
+            QMessageBox.information(self, "正在处理", "请等待当前任务完成。")
+            return
+        if self.game_dir is None or not self.game_dir.is_dir():
+            QMessageBox.warning(
+                self, "目录不存在", f"游戏目录不存在：{self.game_dir or '(未设置游戏目录)'}"
+            )
+            return
+        try:
+            detected, _instance = modpack.resolve_instance(self.game_dir)
+        except modpack.ModpackError as exc:
+            QMessageBox.warning(self, "无法导出", str(exc))
+            return
+        # The version selected in the version library wins; the directory
+        # heuristic is only a fallback when the window never pushed one.
+        version_id = self.current_version or detected or ""
+        if not version_id:
+            QMessageBox.warning(
+                self, "无法导出", "没有找到已安装的版本，请先在「下载 / 安装」页安装一个版本。"
+            )
+            return
+        self._export_version_hint = (
+            "" if self.current_version else f"未指定版本，按 {version_id} 导出"
+        )
+        suggested = Path.home() / f"{version_id}-{timestamp_slug()}.mrpack"
+        chosen, _ = QFileDialog.getSaveFileName(
+            self, "导出整合包", str(suggested), "Modrinth 整合包 (*.mrpack)"
+        )
+        if not chosen:
+            return
+        target = Path(chosen)
+        if target.suffix.lower() != ".mrpack":
+            target = target.with_name(target.name + ".mrpack")
+        self._busy = True
+        self.import_button.setEnabled(False)
+        self.export_button.setEnabled(False)
+        self.progress.set_shimmer(True)
+        self.progress.setRange(0, 100)
+        self.progress.setValue(0)
+        self.status.setProperty("level", "running")
+        self.status.setText(f"正在导出 {version_id} 为整合包…")
+        self._repolish(self.status)
+        game_dir = self.game_dir
+
+        def work(progress, cancelled):
+            return modpack.export_pack(
+                game_dir,
+                target,
+                version_id=version_id,
+                progress=lambda message, done, total: progress(message, done, total),
+                cancel=cancelled,
+            )
+
+        start_task(
+            self,
+            work,
+            on_done=self._on_exported,
+            on_failed=self._on_export_failed,
+            on_progress=self._on_progress,
+        )
+
+    def _on_exported(self, result: modpack.ExportResult) -> None:
+        self._busy = False
+        self.import_button.setEnabled(self._pack is not None)
+        self.export_button.setEnabled(True)
+        self.progress.set_shimmer(False)
+        self.progress.setRange(0, 100)
+        self.progress.setValue(100)
+        self.progress.setFormat("导出完成")
+        self.status.setProperty("level", "success")
+        hint = self._export_version_hint
+        self.status.setText(
+            f"导出完成（{result.version_id}）：{result.entries} 个条目，"
+            f"共 {human_size(result.size)}\n{result.path}"
+            + (f"\n{hint}" if hint else "")
+        )
+        self._repolish(self.status)
+        lines = [
+            f"版本：{result.version_id}",
+            *([hint] if hint else []),
+            f"Mod {result.mods} 个，配置文件 {result.config_files} 个，共 {result.entries} 个条目",
+            f"大小：{human_size(result.size)}",
+            f"位置：{result.path}",
+        ]
+        if result.notes:
+            lines.append("")
+            lines.extend(result.notes)
+        box = QMessageBox(self)
+        box.setWindowTitle("整合包导出结果")
+        box.setIcon(QMessageBox.Icon.Information)
+        box.setText(f"{result.name} 导出完成")
+        box.setInformativeText("\n".join(lines))
+        run_in_window(self, box, "整合包导出结果")
+        self.log_requested.emit(
+            "success",
+            f"整合包已导出：{result.path}（{result.entries} 个条目，{human_size(result.size)}）"
+            + (f" · {hint}" if hint else ""),
+        )
+
+    def _on_export_failed(self, message: str) -> None:
+        self._busy = False
+        self.import_button.setEnabled(self._pack is not None)
+        self.export_button.setEnabled(True)
+        self.progress.set_shimmer(False)
+        self.progress.setRange(0, 100)
+        self.progress.setValue(0)
+        self.progress.setFormat("导出失败")
+        self.status.setProperty("level", "error")
+        self.status.setText(message)
+        self._repolish(self.status)
+        QMessageBox.warning(self, "整合包导出失败", message)
+        self.log_requested.emit("error", f"整合包导出失败：{message}")
 
     # ----------------------------------------------------------------- drag
     def dragEnterEvent(self, event) -> None:  # noqa: N802

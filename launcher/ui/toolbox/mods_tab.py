@@ -10,6 +10,7 @@ from PySide6.QtCore import QUrl, Qt, Signal
 from PySide6.QtGui import QBrush, QColor, QDesktopServices
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QApplication,
     QComboBox,
     QDialog,
     QHBoxLayout,
@@ -28,6 +29,7 @@ from ...services import modrinth, mods as mods_service
 from ...services.modrinth import ModUpdate
 from ...services.util import human_size
 from ..widgets import natural_key
+from ..dialog_page import run_in_window
 from ..loading_overlay import LoadingOverlay
 from .common import card, open_path, start_task
 
@@ -109,6 +111,10 @@ class ModsTab(QWidget):
         self.conflict_button = QPushButton("冲突检测")
         self.conflict_button.clicked.connect(self.check_conflicts)
         buttons.addWidget(self.conflict_button)
+        self.copy_report_button = QPushButton("复制报告")
+        self.copy_report_button.setObjectName("Ghost")
+        self.copy_report_button.clicked.connect(self.copy_report)
+        buttons.addWidget(self.copy_report_button)
 
         self.update_button = QPushButton("检查更新")
         self.update_button.clicked.connect(self.check_updates)
@@ -504,6 +510,37 @@ class ModsTab(QWidget):
         open_path(self.game_dir / "mods", create=True)
 
     # ------------------------------------------------------------ conflicts
+    def copy_report(self) -> None:
+        if not self._mods:
+            self.log_requested.emit("warn", "没有可扫描的 Mod")
+            return
+        report = mods_service.scan_conflicts(self._mods)
+        lines = [f"CoreNextLauncher Mod 冲突报告 · {len(self._mods)} 个 Mod", ""]
+        if report.healthy:
+            lines.append("结果：未发现重复 Mod、重复文件或缺失前置。")
+        for mod_id, names in sorted(report.duplicates.items()):
+            lines.append(f"[重复 ID] {mod_id}: {', '.join(sorted(names))}")
+        for _name, names in sorted(report.duplicate_files.items()):
+            lines.append(f"[同名文件] {', '.join(sorted(names))}")
+        for owner, dep, jar in report.missing:
+            lines.append(f"[缺失前置] {owner} 需要 {dep}（{jar}）")
+        for owner, dep, jar in report.disabled_deps:
+            lines.append(f"[前置被禁用] {owner} 需要 {dep}（{jar}）")
+        if report.version_mismatch:
+            lines.append(f"依赖版本不符（{len(report.version_mismatch)} 条）：")
+            for owner, dep, jar in report.version_mismatch[:15]:
+                lines.append(f"  · {owner} → {dep}（{jar}）")
+            if len(report.version_mismatch) > 15:
+                lines.append(f"  … 另有 {len(report.version_mismatch) - 15} 条")
+        if report.conflicts:
+            lines.append(f"已知不兼容（{len(report.conflicts)} 条）：")
+            for owner, dep, jar in report.conflicts[:15]:
+                lines.append(f"  · {owner} → {dep}（{jar}）")
+            if len(report.conflicts) > 15:
+                lines.append(f"  … 另有 {len(report.conflicts) - 15} 条")
+        QApplication.clipboard().setText("\n".join(lines))
+        self.log_requested.emit("success", "Mod 冲突报告已复制到剪贴板")
+
     def check_conflicts(self) -> None:
         if not self._mods:
             QMessageBox.information(self, "没有 Mod", "mods 目录中没有找到 jar 文件。")
@@ -534,6 +571,20 @@ class ModsTab(QWidget):
             lines.append(f"前置已安装但被禁用（{len(report.disabled_deps)} 条）：")
             for owner, dep, jar in report.disabled_deps[:20]:
                 lines.append(f"  · {owner} 需要 {dep}，但该前置当前处于禁用状态（来自 {jar}）")
+        if report.version_mismatch:
+            lines.append("")
+            lines.append(f"依赖版本不符（{len(report.version_mismatch)} 条）：")
+            for owner, dep, jar in report.version_mismatch[:20]:
+                lines.append(f"  · {owner} → {dep}（{jar}）")
+            if len(report.version_mismatch) > 20:
+                lines.append(f"  … 另有 {len(report.version_mismatch) - 20} 条")
+        if report.conflicts:
+            lines.append("")
+            lines.append(f"已知不兼容（{len(report.conflicts)} 条）：")
+            for owner, dep, jar in report.conflicts[:20]:
+                lines.append(f"  · {owner} → {dep}（{jar}）")
+            if len(report.conflicts) > 20:
+                lines.append(f"  … 另有 {len(report.conflicts) - 20} 条")
         if report.unreadable:
             lines.append("")
             lines.append("无法识别的 jar：")
@@ -554,7 +605,8 @@ class ModsTab(QWidget):
             f"已检查 {len(self._mods)} 个 Mod。"
             + (
                 f"重复 ID {len(report.duplicates)} 个，同名文件 {len(report.duplicate_files)} 组，"
-                f"缺失前置 {len(report.missing)} 条，前置被禁用 {len(report.disabled_deps)} 条。"
+                f"缺失前置 {len(report.missing)} 条，前置被禁用 {len(report.disabled_deps)} 条，"
+                f"依赖版本不符 {len(report.version_mismatch)} 条，已知不兼容 {len(report.conflicts)} 条。"
                 if not report.healthy
                 else ""
             )

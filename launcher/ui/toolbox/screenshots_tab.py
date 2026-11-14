@@ -304,11 +304,18 @@ class ScreenshotViewer(QDialog):
         target = self.view.size()
         if target.width() <= 4 or target.height() <= 4:
             return
+        # Scale to the *device* pixel count and tag the result, otherwise the
+        # label upscales a logical-size pixmap by the screen scale factor.
+        dpr = self.view.devicePixelRatioF() or 1.0
+        device = QSize(
+            max(1, round(target.width() * dpr)), max(1, round(target.height() * dpr))
+        )
         scaled = self._pixmap.scaled(
-            target,
+            device,
             Qt.AspectRatioMode.KeepAspectRatio,
             Qt.TransformationMode.SmoothTransformation,
         )
+        scaled.setDevicePixelRatio(dpr)
         self.view.setPixmap(scaled)
 
     def resizeEvent(self, event) -> None:  # noqa: N802

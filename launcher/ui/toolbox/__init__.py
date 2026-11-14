@@ -1,11 +1,14 @@
-"""百宝箱: 目录清理、Mod 管理、崩溃诊断、整合包、服务器、截图与优化."""
+"""百宝箱: 目录清理、Mod 管理、崩溃诊断、整合包、服务器、截图、优化与高速下载."""
 
 from __future__ import annotations
 
-from PySide6.QtCore import Signal
-from PySide6.QtWidgets import QLabel, QTabWidget, QVBoxLayout, QWidget
+from PySide6.QtCore import Qt, Signal
+from PySide6.QtWidgets import QFrame, QLabel, QScrollArea, QTabWidget, QVBoxLayout, QWidget
+
+from ..widgets import install_tab_transition
 
 from .diagnose_tab import DiagnoseTab
+from .download_tab import DownloadTab
 from .modpack_tab import ModpackImportDialog, ModpackTab
 from .mods_tab import ModsTab
 from .optimize_tab import OptimizeTab
@@ -30,7 +33,18 @@ class ToolboxPage(QWidget):
         self.setObjectName("ToolboxPage")
         self.game_dir = game_dir
 
-        layout = QVBoxLayout(self)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        scroll = QScrollArea()
+        scroll.setObjectName("ToolboxScroll")
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        outer.addWidget(scroll)
+        inner = QWidget()
+        inner.setObjectName("PageInner")
+        scroll.setWidget(inner)
+        layout = QVBoxLayout(inner)
         layout.setContentsMargins(2, 8, 14, 10)
         layout.setSpacing(8)
 
@@ -40,9 +54,10 @@ class ToolboxPage(QWidget):
         title.setObjectName("PageTitle")
         header.addWidget(title)
         subtitle = QLabel(
-            "目录与清理、可视化 Mod 管理、崩溃诊断、整合包、服务器、截图和性能优化。"
+            "目录与清理、可视化 Mod 管理、崩溃诊断、整合包、服务器、截图、性能优化和高速下载。"
         )
         subtitle.setObjectName("Muted")
+        subtitle.setWordWrap(True)
         header.addWidget(subtitle)
         layout.addLayout(header)
 
@@ -55,6 +70,7 @@ class ToolboxPage(QWidget):
         self.servers_tab = ServersTab()
         self.screenshots_tab = ScreenshotsTab()
         self.optimize_tab = OptimizeTab()
+        self.download_tab = DownloadTab()
 
         for widget, label in (
             (self.shortcuts_tab, "目录与备份"),
@@ -64,9 +80,12 @@ class ToolboxPage(QWidget):
             (self.servers_tab, "服务器"),
             (self.screenshots_tab, "截图"),
             (self.optimize_tab, "优化"),
+            (self.download_tab, "高速下载"),
         ):
             self.tabs.addTab(widget, label)
+        self.tabs.setMinimumHeight(620)
         layout.addWidget(self.tabs, 1)
+        install_tab_transition(self.tabs)
 
         for tab in (
             self.shortcuts_tab,
@@ -76,6 +95,7 @@ class ToolboxPage(QWidget):
             self.servers_tab,
             self.screenshots_tab,
             self.optimize_tab,
+            self.download_tab,
         ):
             tab.log_requested.connect(self.log_requested)
             if hasattr(tab, "join_requested"):
@@ -105,8 +125,15 @@ class ToolboxPage(QWidget):
             self.servers_tab,
             self.screenshots_tab,
             self.optimize_tab,
+            self.download_tab,
         ):
             tab.set_game_dir(self.game_dir)
+
+    def set_current_version(self, version_id: str) -> None:
+        """Forward the version selected in the version library to the tabs."""
+        forward = getattr(self.modpack_tab, "set_current_version", None)
+        if forward is not None:
+            forward(version_id)
 
     def focus_modpack(self, path: str) -> None:
         """Switch to the 整合包 tab and preload a dropped ``.mrpack``."""

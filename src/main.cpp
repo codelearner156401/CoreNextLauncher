@@ -10,6 +10,7 @@
 #include "launch.hpp"
 #include "crash.hpp"
 #include "install.hpp"
+#include "http.hpp"
 
 using json = nlohmann::json;
 namespace fs = std::filesystem;
@@ -64,6 +65,25 @@ int main(int argc, char** argv) {
             fs::path mc_dir = input["mc_dir"].get<std::string>();
             std::string vid = input["version_id"].get<std::string>();
             install_version(mc_dir, vid);
+        } else if (cmd == "download-url") {
+            // Generic ranged download for the toolbox: same worker pool, retry and
+            // checksum path the installer uses, so a broken mirror cannot leave a
+            // half file behind.
+            DownloadTask task;
+            task.url = input.at("url").get<std::string>();
+            task.dest = fs::path(input.at("dest").get<std::string>());
+            task.sha1 = input.value("sha1", "");
+            task.size = input.value("size", 0LL);
+            const int threads = input.value("threads", 8);
+            if (task.url.empty()) throw std::runtime_error("缺少下载地址");
+            if (task.dest.empty()) throw std::runtime_error("缺少保存路径");
+            event::status("开始下载：" + task.url);
+            const std::string label = task.dest.filename().string();
+            const bool ok = download_ranged(task, threads,
+                [&](long long done, long long total) { event::progress(done, total, label); });
+            if (!ok) throw std::runtime_error("下载失败：" + task.url);
+            const long long written = file_size_or_negative(task.dest);
+            event::done({{"dest", task.dest.string()}, {"size", written}});
         } else {
             event::done({{"data", "OK"}});
         }

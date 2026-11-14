@@ -40,6 +40,7 @@ class ModFile:
     loader: str = ""
     description: str = ""
     depends: dict[str, str] = field(default_factory=dict)
+    conflicts: list[str] = field(default_factory=list)
     error: str = ""
 
     @property
@@ -61,10 +62,15 @@ class ModConflictReport:
     duplicate_files: dict[str, list[str]] = field(default_factory=dict)
     missing: list[tuple[str, str, str]] = field(default_factory=list)
     disabled_deps: list[tuple[str, str, str]] = field(default_factory=list)
+    version_mismatch: list[tuple[str, str, str]] = field(default_factory=list)
+    conflicts: list[tuple[str, str, str]] = field(default_factory=list)
     unreadable: list[str] = field(default_factory=list)
 
     @property
     def healthy(self) -> bool:
+        # version_mismatch / conflicts stay out of this flag on purpose: the
+        # launch pre-check renders only the four sections above, so counting
+        # them here would open a blocking dialog that lists no reason.
         return not (
             self.duplicates
             or self.duplicate_files
@@ -121,6 +127,9 @@ def _read_fabric_meta(archive: zipfile.ZipFile, names: set[str]) -> dict | None:
     depends = raw.get("depends") or {}
     if not isinstance(depends, dict):
         depends = {}
+    breaks = raw.get("breaks") or raw.get("conflicts") or {}
+    if not isinstance(breaks, dict):
+        breaks = {}
     return {
         "loader": "fabric",
         "mod_id": str(raw.get("id") or ""),
@@ -129,6 +138,7 @@ def _read_fabric_meta(archive: zipfile.ZipFile, names: set[str]) -> dict | None:
         "author": _authors_text(raw.get("authors") or raw.get("author")),
         "description": str(raw.get("description") or ""),
         "depends": {str(k): str(v) for k, v in depends.items()},
+        "conflicts": [str(key) for key in breaks],
     }
 
 
@@ -144,6 +154,12 @@ def _read_quilt_meta(archive: zipfile.ZipFile, names: set[str]) -> dict | None:
         for entry in depends:
             if isinstance(entry, dict) and entry.get("id"):
                 deps[str(entry["id"])] = str(entry.get("versions") or "")
+    breaks = loader_block.get("breaks") or []
+    conflicts = [
+        str(entry["id"])
+        for entry in (breaks if isinstance(breaks, list) else [])
+        if isinstance(entry, dict) and entry.get("id")
+    ]
     return {
         "loader": "quilt",
         "mod_id": str(loader_block.get("id") or ""),
@@ -152,7 +168,21 @@ def _read_quilt_meta(archive: zipfile.ZipFile, names: set[str]) -> dict | None:
         "author": _authors_text(metadata.get("authors") or metadata.get("author")),
         "description": str(metadata.get("description") or ""),
         "depends": deps,
+        "conflicts": conflicts,
     }
+
+
+def _dependency_kind(entry: dict) -> str:
+    """Kind of one Forge/NeoForge dependency table entry.
+
+    NeoForge 1.x replaced the boolean ``mandatory`` with ``type`` taking
+    ``required`` / ``optional`` / ``incompatible`` (mod-file spec, section
+    "Dependency"); Forge still writes ``mandatory``.
+    """
+    kind = entry.get("type")
+    if isinstance(kind, str) and kind.strip():
+        return kind.strip().lower()
+    return "required" if entry.get("mandatory", True) else "optional"
 
 
 def _read_forge_meta(archive: zipfile.ZipFile, names: set[str]) -> dict | None:
@@ -165,19 +195,31 @@ def _read_forge_meta(archive: zipfile.ZipFile, names: set[str]) -> dict | None:
             continue
         mods = data.get("mods") or []
         if not isinstance(mods, list) or not mods:
-            return None
-        first = mods[0] if isinstance(mods[0], dict) else {}
+            continue
+        declared = [entry for entry in mods if isinstance(entry, dict)]
+        first = declared[0] if declared else {}
         depends: dict[str, str] = {}
+        conflicts: list[str] = []
         deps_root = data.get("dependencies") or {}
         if isinstance(deps_root, dict):
-            for _owner, entries in deps_root.items():
+            # Every [[mods]] entry brings its own [dependencies.<modId>] table.
+            owners = [str(entry.get("modId") or "") for entry in declared]
+            owners = [owner for owner in owners if owner]
+            for owner in deps_root:
+                if str(owner) not in owners:
+                    owners.append(str(owner))
+            for owner in owners:
+                entries = deps_root.get(owner) or []
                 if not isinstance(entries, list):
                     continue
                 for entry in entries:
-                    if not isinstance(entry, dict) or not entry.get("mandatory", True):
+                    if not isinstance(entry, dict) or not entry.get("modId"):
                         continue
-                    dep_id = str(entry.get("modId") or "")
-                    if dep_id:
+                    dep_id = str(entry["modId"])
+                    kind = _dependency_kind(entry)
+                    if kind == "incompatible":
+                        conflicts.append(dep_id)
+                    elif kind == "required":
                         depends[dep_id] = str(entry.get("versionRange") or "")
         return {
             "loader": "neoforge" if "neoforge.mods.toml" in candidate else "forge",
@@ -187,6 +229,7 @@ def _read_forge_meta(archive: zipfile.ZipFile, names: set[str]) -> dict | None:
             "author": _authors_text(first.get("authors") or first.get("author")),
             "description": str(first.get("description") or ""),
             "depends": depends,
+            "conflicts": conflicts,
         }
     return None
 
@@ -276,22 +319,101 @@ def load_mods(game_dir: str | Path) -> tuple[list[ModFile], Path]:
                 loader=str(meta.get("loader") or ""),
                 description=str(meta.get("description") or ""),
                 depends=dict(meta.get("depends") or {}),
+                conflicts=list(meta.get("conflicts") or []),
                 error=str(meta.get("error") or ""),
             )
         )
     return mods, folder
 
 
+def _version_tuple(text: str) -> tuple[int, ...] | None:
+    """Parse "1.20.1" / "0.83.0+mc1.20" into numbers; None when unusable."""
+    numbers: list[int] = []
+    for part in str(text).strip().split("."):
+        digits = ""
+        for char in part:
+            if not char.isdigit():
+                break
+            digits += char
+        if not digits:
+            return None
+        numbers.append(int(digits))
+        if len(digits) != len(part):
+            break  # a prerelease/build suffix ends the comparable part
+    return tuple(numbers) if numbers else None
+
+
+def _at_least(left: tuple[int, ...], right: tuple[int, ...]) -> bool:
+    size = max(len(left), len(right))
+    return left + (0,) * (size - len(left)) >= right + (0,) * (size - len(right))
+
+
+def _atom_satisfied(atom: str, version: tuple[int, ...]) -> bool | None:
+    """Check one atom of a Fabric/Quilt range; None means "cannot decide"."""
+    if atom in {"*", "x", "X", "any"}:
+        return True
+    if atom.startswith(">="):
+        floor = _version_tuple(atom[2:])
+        return None if floor is None else _at_least(version, floor)
+    if atom.startswith("<="):
+        ceiling = _version_tuple(atom[2:])
+        return None if ceiling is None else _at_least(ceiling, version)
+    if atom.startswith(">"):
+        floor = _version_tuple(atom[1:])
+        return None if floor is None else not _at_least(floor, version)
+    if atom.startswith("<"):
+        ceiling = _version_tuple(atom[1:])
+        return None if ceiling is None else not _at_least(version, ceiling)
+    if atom[:1] in {"~", "^", "!"}:
+        return None  # operators outside this check: stay silent instead of guessing
+    if atom[-1:] in {"*", "x", "X"}:
+        prefix = _version_tuple(atom[:-1].rstrip("."))
+        if prefix is None:
+            return None
+        return version[: len(prefix)] == prefix
+    exact = _version_tuple(atom)
+    if exact is None:
+        return None
+    return _at_least(version, exact) and _at_least(exact, version)
+
+
+def _range_satisfied(requirement: str, version_text: str) -> bool | None:
+    """Check a Fabric/Quilt dependency range; None when undecidable."""
+    version = _version_tuple(version_text)
+    if version is None:
+        return None
+    undecided = False
+    for alternative in str(requirement).split("||"):
+        atoms = alternative.replace(",", " ").split()
+        if not atoms:
+            undecided = True
+            continue
+        for atom in atoms:
+            outcome = _atom_satisfied(atom, version)
+            if outcome is None:
+                undecided = True
+            if not outcome:
+                break
+        else:
+            return True
+    return None if undecided else False
+
+
 def scan_conflicts(mods: list[ModFile], include_platform: bool = True) -> ModConflictReport:
     report = ModConflictReport()
     by_id: dict[str, list[str]] = {}
     enabled_ids: set[str] = set()
+    enabled_by_id: dict[str, list[str]] = {}
+    enabled_versions: dict[str, str] = {}
     by_filename: dict[str, list[str]] = {}
     for mod in mods:
-        base = mod.filename
-        if base.lower().endswith(DISABLED_SUFFIX):
-            base = base[: -len(DISABLED_SUFFIX)]
-        by_filename.setdefault(base.lower(), []).append(mod.filename)
+        if mod.enabled:
+            # A kept .disabled backup is not a second copy of the mod, so both
+            # duplicate checks below only look at enabled jars.
+            base = mod.filename
+            if base.lower().endswith(DISABLED_SUFFIX):
+                base = base[: -len(DISABLED_SUFFIX)]
+            by_filename.setdefault(base.lower(), []).append(mod.filename)
         if mod.error or not mod.mod_id:
             if mod.error:
                 report.unreadable.append(f"{mod.filename}：{mod.error}")
@@ -299,9 +421,11 @@ def scan_conflicts(mods: list[ModFile], include_platform: bool = True) -> ModCon
         by_id.setdefault(mod.mod_id, []).append(mod.filename)
         if mod.enabled:
             enabled_ids.add(mod.mod_id)
+            enabled_by_id.setdefault(mod.mod_id, []).append(mod.filename)
+            enabled_versions.setdefault(mod.mod_id, mod.version)
     report.duplicates = {
         mod_id: names
-        for mod_id, names in by_id.items()
+        for mod_id, names in enabled_by_id.items()
         if len(names) > 1 and mod_id not in {"minecraft", "java"}
     }
     report.duplicate_files = {
@@ -310,7 +434,7 @@ def scan_conflicts(mods: list[ModFile], include_platform: bool = True) -> ModCon
     for mod in mods:
         if mod.error or not mod.enabled:
             continue
-        for dep_id, _range in mod.depends.items():
+        for dep_id, dep_range in mod.depends.items():
             if include_platform and dep_id in PLATFORM_MOD_IDS:
                 continue
             if dep_id.startswith("java"):
@@ -320,6 +444,23 @@ def scan_conflicts(mods: list[ModFile], include_platform: bool = True) -> ModCon
             elif dep_id not in enabled_ids:
                 report.disabled_deps.append(
                     (mod.mod_id or mod.display_name, dep_id, mod.filename)
+                )
+            elif mod.loader in {"fabric", "quilt"}:
+                # Forge/NeoForge use Maven ranges; only Fabric/Quilt ranges are
+                # compared here, and an undecidable range stays silent.
+                actual = enabled_versions.get(dep_id, "")
+                if _range_satisfied(dep_range, actual) is False:
+                    report.version_mismatch.append(
+                        (
+                            mod.mod_id or mod.display_name,
+                            f"{dep_id} {dep_range}".strip(),
+                            mod.filename,
+                        )
+                    )
+        for conflict_id in mod.conflicts:
+            if conflict_id in enabled_ids:
+                report.conflicts.append(
+                    (mod.mod_id or mod.display_name, conflict_id, mod.filename)
                 )
     return report
 

@@ -172,7 +172,7 @@ inline void init_share() {
 inline void apply_common_options(CURL* c) {
     curl_easy_setopt(c, CURLOPT_FOLLOWLOCATION, 1L);
     curl_easy_setopt(c, CURLOPT_MAXREDIRS, 10L);
-    curl_easy_setopt(c, CURLOPT_USERAGENT, "CoreNextLauncher/1.9.2");
+    curl_easy_setopt(c, CURLOPT_USERAGENT, "CoreNextLauncher/1.9.4");
     curl_easy_setopt(c, CURLOPT_CONNECTTIMEOUT, 20L);
     curl_easy_setopt(c, CURLOPT_LOW_SPEED_LIMIT, 512L);
     curl_easy_setopt(c, CURLOPT_LOW_SPEED_TIME, 45L);
@@ -1084,7 +1084,7 @@ inline std::vector<std::string> build_launch_command(const json& vjson, const fs
         {"${version_type}", vjson.value("type", "release")},
         {"${natives_directory}", fs::absolute(mc_dir / "versions" / vid / "natives").u8string()},
         {"${launcher_name}", "CoreNextLauncher"},
-        {"${launcher_version}", "1.9.2"},
+        {"${launcher_version}", "1.9.4"},
         {"${classpath}", classpath}};
     auto replace = [&](std::string s) {
         for (auto& [key, value] : ph) {

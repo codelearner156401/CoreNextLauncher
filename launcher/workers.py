@@ -15,7 +15,9 @@ class ScanWorker(QThread):
 
     def __init__(self, client: CoreClient, game_dir: str, parent=None) -> None:
         super().__init__(parent)
-        self.client = client
+        # Each worker owns its process registration, so one command can never
+        # kill (or read the exit state of) another worker's core process.
+        self.client = client.clone()
         self.game_dir = game_dir
 
     def run(self) -> None:  # noqa: D401 - QThread entry point
@@ -32,7 +34,7 @@ class LaunchWorker(QThread):
 
     def __init__(self, client: CoreClient, payload: dict[str, Any], parent=None) -> None:
         super().__init__(parent)
-        self.client = client
+        self.client = client.clone()
         self.payload = payload
 
     def run(self) -> None:
@@ -63,7 +65,7 @@ class InstallWorker(QThread):
 
     def __init__(self, client: CoreClient, payload: dict[str, Any], parent=None) -> None:
         super().__init__(parent)
-        self.client = client
+        self.client = client.clone()
         self.payload = payload
 
     def run(self) -> None:

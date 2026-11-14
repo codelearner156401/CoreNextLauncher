@@ -14,7 +14,7 @@ class SkinPage(SubPage):
     def __init__(self, parent=None) -> None:
         super().__init__(
             "皮肤管理",
-            "本地皮肤、正版皮肤、Steve / Alex 模型与 3D 预览都在此页面完成，返回按钮滑动回到启动页。",
+            "本地皮肤、正版皮肤与 Steve / Alex 2D 纸娃娃预览都在此页面完成，返回按钮滑动回到启动页。",
             parent,
         )
         self.setObjectName("SkinPage")

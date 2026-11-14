@@ -199,7 +199,7 @@ class BackgroundWidget(QWidget):
         self._image_rev += 1
         if not path:
             return
-        candidate = Path(path)
+        candidate = Path(path).expanduser().resolve()
         if not candidate.is_file():
             self.image_error.emit(f"背景图片不存在，已回退到内置背景：{path}")
             return

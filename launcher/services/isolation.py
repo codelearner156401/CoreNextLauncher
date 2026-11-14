@@ -7,7 +7,10 @@ import shutil
 from pathlib import Path
 
 STATE_NAME = "isolation.json"
-ISOLATED_DIRS = ("mods", "config", "saves", "resourcepacks")
+# libs/natives are deliberately not migrated: they are loader-provided binaries,
+# not player resources, and copying them per version only wastes disk space.
+ISOLATED_DIRS = ("mods", "config", "saves", "resourcepacks", "shaderpacks")
+ISOLATED_FILES = ("options.txt", "options.txt_old", "servers.dat")
 
 
 def state_path(instance: str | Path) -> Path:
@@ -51,6 +54,10 @@ def _copy_shared(instance: Path, target: Path) -> None:
         destination.mkdir(parents=True, exist_ok=True)
         if source.is_dir():
             shutil.copytree(source, destination, dirs_exist_ok=True)
+    for name in ISOLATED_FILES:
+        source = instance / name
+        if source.is_file():
+            shutil.copy2(source, target / name)
 
 
 def _copy_back(instance: Path, target: Path) -> None:
@@ -61,6 +68,10 @@ def _copy_back(instance: Path, target: Path) -> None:
         destination = instance / name
         destination.mkdir(parents=True, exist_ok=True)
         shutil.copytree(source, destination, dirs_exist_ok=True)
+    for name in ISOLATED_FILES:
+        source = target / name
+        if source.is_file():
+            shutil.copy2(source, instance / name)
 
 
 def set_isolation(
@@ -89,6 +100,8 @@ def set_isolation(
         # Keep the version JSON/JAR, remove only the isolated resource folders.
         for name in ISOLATED_DIRS:
             shutil.rmtree(target / name, ignore_errors=True)
+        for name in ISOLATED_FILES:
+            (target / name).unlink(missing_ok=True)
     _save_state(instance, versions)
     return target
 

@@ -22,7 +22,6 @@ class StartPage(QWidget):
     open_folder_requested = Signal()
     open_logs_requested = Signal()
     log_requested = Signal(str, str)
-    skin_requested = Signal()
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -88,10 +87,6 @@ class StartPage(QWidget):
         self.logs_button.setObjectName("Ghost")
         self.logs_button.clicked.connect(self.open_logs_requested.emit)
         quick.addWidget(self.logs_button)
-        self.skin_button = QPushButton("皮肤管理")
-        self.skin_button.setObjectName("Ghost")
-        self.skin_button.clicked.connect(self.skin_requested.emit)
-        quick.addWidget(self.skin_button)
         quick.addStretch(1)
         layout.addLayout(quick)
         layout.addStretch(1)

@@ -586,9 +586,9 @@ def test_servers() -> None:
 
 def test_updater() -> None:
     print("updater")
-    check("version parse", updater.parse_version("v1.9.2") == (1, 9, 2))
+    check("version parse", updater.parse_version("v1.9.4") == (1, 9, 4))
     check("newer detected", updater.is_newer("v1.10.0", "1.9.9"))
-    check("same not newer", not updater.is_newer("v1.9.2", APP_VERSION))
+    check("same not newer", not updater.is_newer("v1.9.4", APP_VERSION))
     check("older not newer", not updater.is_newer("v1.0.0", APP_VERSION))
     asset = updater._pick_asset(
         [
@@ -795,6 +795,10 @@ def test_ui(root: Path) -> None:
         and window.dev_state.developer_unlocked,
     )
     check("developer card shown after unlock", not window.settings_page.dev_card.isHidden())
+    check("cached login disabled by default", not window.settings_page.cached_login_enabled())
+    window.settings_page.cached_login_check.setChecked(True)
+    check("cached login can be enabled explicitly", window.settings_page.cached_login_enabled())
+    window.settings_page.cached_login_check.setChecked(False)
     check("developer state persisted for the session", DEV_STATE_PATH.is_file())
     window._on_theme_changed("light")
     for _ in range(6):

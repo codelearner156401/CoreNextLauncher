@@ -1,0 +1,5 @@
+GNU Lesser General Public License, Version 3 (29 June 2007)
+Source: canonical FSF text bundled with the autocommand package
+        (https://www.gnu.org/licenses/lgpl-3.0.txt was unreachable from the build machine)
+Recorded: 2026-11-14 (CoreNextLauncher 1.9.9)
+Applies to: the PySide6 / Qt for Python runtime libraries bundled by PyInstaller

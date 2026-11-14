@@ -29,6 +29,18 @@ from pathlib import Path
 WORKSPACE_NAME = "CoreNextLauncher"
 ENV_HOME = "CORENEXTLAUNCHER_HOME"
 
+_LAST_ERROR = ""
+
+
+def last_workspace_error() -> str:
+    """Reason the last workspace/config/kernel operation failed ('' when none)."""
+    return _LAST_ERROR
+
+
+def _record_error(message: str) -> None:
+    global _LAST_ERROR
+    _LAST_ERROR = message
+
 
 def is_frozen() -> bool:
     return bool(getattr(sys, "frozen", False))
@@ -235,9 +247,22 @@ def ensure_workspace() -> Workspace:
     try:
         if not any(path.is_dir() for path in workspace.instances.iterdir()):
             (workspace.instances / "default").mkdir(parents=True, exist_ok=True)
-    except OSError:
-        pass
+    except OSError as exc:
+        _record_error(f"无法创建默认实例目录 {workspace.instances}：{exc}")
     return workspace
+
+
+def workspace_writable() -> bool:
+    """Verify the portable workspace can be written before launching."""
+    try:
+        probe = workspace_root() / ".write_test"
+        probe.parent.mkdir(parents=True, exist_ok=True)
+        probe.write_text("ok", encoding="utf-8")
+        probe.unlink(missing_ok=True)
+        return True
+    except OSError as exc:
+        _record_error(f"工作区 {workspace_root()} 不可写：{exc}")
+        return False
 
 
 def deploy_kernel() -> Path:
@@ -245,7 +270,8 @@ def deploy_kernel() -> Path:
     target = kernel_dir() / "mc_core.exe"
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
-    except OSError:
+    except OSError as exc:
+        _record_error(f"无法创建内核目录 {target.parent}：{exc}")
         return target
     source = app_root() / "build" / "mc_core.exe"
     if not source.is_file():
@@ -260,8 +286,8 @@ def deploy_kernel() -> Path:
             ):
                 return target
         shutil.copy2(source, target)
-    except OSError:
-        pass
+    except OSError as exc:
+        _record_error(f"内核部署失败 {source} -> {target}：{exc}")
     return target
 
 

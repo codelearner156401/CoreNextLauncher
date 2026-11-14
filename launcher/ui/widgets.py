@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import html
+import math
 import re
 from datetime import datetime
 
@@ -10,12 +11,14 @@ from PySide6.QtCore import (
     Property,
     QEasingCurve,
     QEvent,
+    QObject,
     QPoint,
     QPropertyAnimation,
     QRect,
     QRectF,
     QSize,
     Qt,
+    QThread,
     QTimer,
     Signal,
 )
@@ -32,6 +35,7 @@ from PySide6.QtGui import (
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QGraphicsDropShadowEffect,
+    QGraphicsOpacityEffect,
     QLabel,
     QListWidget,
     QListWidgetItem,
@@ -42,9 +46,11 @@ from PySide6.QtWidgets import (
     QStyle,
     QStyledItemDelegate,
     QStyleOptionButton,
+    QStyleOptionProgressBar,
     QStyleOptionViewItem,
     QStylePainter,
     QTabBar,
+    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -346,7 +352,15 @@ class AnimatedLaunchButton(QPushButton):
         painter = QStylePainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
-        center = self.rect().center()
+        rect = self.rect()
+        center = rect.center()
+        if self._scale > 1.0:
+            # The surface is scaled about the widget centre, so draw it inside
+            # an inset rect; otherwise the grown corners get clipped away.
+            inset = int(
+                math.ceil((self._scale - 1.0) * min(rect.width(), rect.height()) / 2.0)
+            )
+            option.rect = rect.adjusted(inset, inset, -inset, -inset)
         painter.translate(center)
         painter.scale(self._scale, self._scale)
         painter.translate(-center)
@@ -423,8 +437,24 @@ class AnimatedTabBar(QTabBar):
         super().showEvent(event)
         QTimer.singleShot(0, self._set_indicator_now)
 
+    def _update_scroll_buttons(self) -> None:
+        """Only pay for scroll buttons when the tabs genuinely do not fit."""
+        if self.count() == 0:
+            return
+        needed = sum(self.tabSizeHint(index).width() for index in range(self.count()))
+        parent = self.parentWidget()
+        available = parent.width() if parent is not None else self.width()
+        overflow = bool(available) and needed > available
+        if self.usesScrollButtons() != overflow:
+            self.setUsesScrollButtons(overflow)
+
+    def tabInserted(self, index: int) -> None:  # noqa: N802
+        super().tabInserted(index)
+        self._update_scroll_buttons()
+
     def resizeEvent(self, event) -> None:  # noqa: N802
         super().resizeEvent(event)
+        self._update_scroll_buttons()
         self._set_indicator_now()
 
     def paintEvent(self, event) -> None:  # noqa: N802
@@ -502,6 +532,87 @@ class SlidingStackedWidget(QStackedWidget):
 FadingStackedWidget = SlidingStackedWidget
 
 
+class TabSwitchTransition(QObject):
+    """Fade-in plus a slight horizontal shift when a QTabWidget page changes.
+
+    The incoming page fades 0 -> 1 through a QGraphicsOpacityEffect while it
+    slides in from SHIFT_WIDTH px. Both animations are plain
+    QPropertyAnimation objects parented to the animated page, and the duration
+    goes through anim.ms so the global speed slider applies. The tab bar itself
+    is untouched and no extra container wraps the pages, so their existing
+    layouts keep full control of their geometry.
+    """
+
+    FADE_BASE_MS = 160  # 160 ms at 1.0x speed, scaled by anim.ms()
+    SHIFT_WIDTH = 8  # px the page slides in from
+
+    def __init__(self, tabs: QTabWidget) -> None:
+        super().__init__(tabs)
+        self._tabs = tabs
+        self._page: QWidget | None = None
+        self._effect: QGraphicsOpacityEffect | None = None
+        self._animations: list[QPropertyAnimation] = []
+        tabs.currentChanged.connect(self._on_current_changed)
+
+    def _settle(self) -> None:
+        """Stop the running transition and force the settled end state."""
+        animations = self._animations
+        self._animations = []
+        for animation in animations:
+            animation.stop()
+            animation.deleteLater()
+        page = self._page
+        effect = self._effect
+        self._page = None
+        self._effect = None
+        if effect is not None:
+            effect.setOpacity(1.0)
+        if page is not None:
+            page.move(0, page.y())
+            page.setGraphicsEffect(None)
+
+    def _on_current_changed(self, index: int) -> None:
+        self._settle()
+        if not anim.loading_enabled() or not self._tabs.isVisible():
+            return
+        page = self._tabs.widget(index)
+        if page is None or page.width() <= 0 or page.graphicsEffect() is not None:
+            return
+        rest_y = page.y()
+        effect = QGraphicsOpacityEffect(page)
+        effect.setOpacity(0.0)
+        page.setGraphicsEffect(effect)
+        page.move(self.SHIFT_WIDTH, rest_y)
+        duration = anim.ms(self.FADE_BASE_MS)
+        fade = QPropertyAnimation(effect, b"opacity", page)
+        fade.setDuration(duration)
+        fade.setStartValue(0.0)
+        fade.setEndValue(1.0)
+        fade.setEasingCurve(QEasingCurve.Type.OutCubic)
+        slide = QPropertyAnimation(page, b"pos", page)
+        slide.setDuration(duration)
+        slide.setStartValue(QPoint(self.SHIFT_WIDTH, rest_y))
+        slide.setEndValue(QPoint(0, rest_y))
+        slide.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self._page = page
+        self._effect = effect
+        self._animations = [fade, slide]
+        fade.finished.connect(self._settle)
+        slide.finished.connect(self._settle)
+        fade.start()
+        slide.start()
+
+
+def install_tab_transition(tabs: QTabWidget) -> TabSwitchTransition:
+    """Install the fade/slide page transition on tabs at most once."""
+    helper = getattr(tabs, "_tab_switch_transition", None)
+    if isinstance(helper, TabSwitchTransition):
+        return helper
+    helper = TabSwitchTransition(tabs)
+    tabs._tab_switch_transition = helper
+    return helper
+
+
 class AnimatedTabView(QWidget):
     """Tab bar + a navigation stack of base tabs and subpages."""
 
@@ -525,12 +636,45 @@ class AnimatedTabView(QWidget):
         self._retired_pages: list[QWidget] = []
 
     def _clear_subpages(self) -> None:
-        for page in self._subpages:
+        pages = list(self._subpages)
+        self._subpages.clear()
+        self._origins.clear()
+        for page in pages:
+            # An embedded dialog page closes its nested event loop through this
+            # signal; without it a tab switch would leave the caller blocked.
+            back = getattr(page, "back_requested", None)
+            if back is not None:
+                try:
+                    back.emit()
+                except RuntimeError:
+                    pass
             self.stack.removeWidget(page)
             page.hide()
             self._retired_pages.append(page)
-        self._subpages.clear()
-        self._origins.clear()
+        self._prune_retired_pages()
+
+    def _prune_retired_pages(self) -> None:
+        """Forget retired pages once their background threads have finished."""
+        alive: list[QWidget] = []
+        for page in self._retired_pages:
+            try:
+                running = any(
+                    isinstance(child, QThread) and child.isRunning()
+                    for child in page.findChildren(QThread)
+                )
+            except RuntimeError:
+                continue
+            if running:
+                alive.append(page)
+            else:
+                page.deleteLater()
+        self._retired_pages = alive
+
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        # The tab bar keeps its minimum width, so a narrower view must be told
+        # that the tabs no longer fit.
+        self.tab_bar._update_scroll_buttons()
 
     def _on_tab_changed(self, index: int) -> None:
         had_subpages = bool(self._subpages)
@@ -576,6 +720,7 @@ class AnimatedTabView(QWidget):
         # Keep the page alive: a background version-catalog / skin task may
         # still be running and QThread must not be destroyed mid-flight.
         self._retired_pages.append(page)
+        self._prune_retired_pages()
 
     def can_go_back(self) -> bool:
         return bool(self._subpages)
@@ -605,6 +750,9 @@ class AnimatedTabView(QWidget):
 class ShimmerProgressBar(QProgressBar):
     """QProgressBar with a moving highlight band over the filled area."""
 
+    _BAND = 84.0
+    _STEP = 7.0
+
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self._shimmer = False
@@ -630,8 +778,19 @@ class ShimmerProgressBar(QProgressBar):
         self._timer.stop()
         super().hideEvent(event)
 
+    def _filled_width(self) -> int:
+        span = max(1, self.maximum() - self.minimum())
+        ratio = 1.0 if self.maximum() <= 0 else (self.value() - self.minimum()) / span
+        return int((self.width() - 2) * max(0.0, min(1.0, ratio)))
+
+    def _period(self, filled: int) -> float:
+        """Travel distance of one highlight sweep; shared by timer and paint."""
+        return max(1.0, float(filled) + self._BAND * 2.0)
+
     def _advance(self) -> None:
-        self._offset = (self._offset + 7.0) % max(1.0, float(self.width() + 160))
+        self._offset = (self._offset + self._STEP) % self._period(
+            max(4, self._filled_width())
+        )
         self.update()
 
     def paintEvent(self, event) -> None:  # noqa: N802
@@ -640,9 +799,7 @@ class ShimmerProgressBar(QProgressBar):
             return
         if self.maximum() > 0 and self.value() >= self.maximum():
             return
-        span = max(1, self.maximum() - self.minimum())
-        ratio = 1.0 if self.maximum() <= 0 else (self.value() - self.minimum()) / span
-        filled = int((self.width() - 2) * max(0.0, min(1.0, ratio)))
+        filled = self._filled_width()
         if filled < 4:
             return
 
@@ -652,13 +809,21 @@ class ShimmerProgressBar(QProgressBar):
         clip.addRoundedRect(QRectF(1, 1, filled, self.height() - 2), 6, 6)
         painter.setClipPath(clip)
 
-        band = 84.0
-        x = (self._offset % (filled + band * 2)) - band
+        band = self._BAND
+        x = (self._offset % self._period(filled)) - band
         gradient = QLinearGradient(x, 0, x + band, 0)
         gradient.setColorAt(0.0, QColor(255, 255, 255, 0))
         gradient.setColorAt(0.5, QColor(255, 255, 255, 60))
         gradient.setColorAt(1.0, QColor(255, 255, 255, 0))
         painter.fillRect(QRectF(0, 0, self.width(), self.height()), gradient)
+
+        # The band must not wash out the label: draw the text again on top.
+        painter.setClipping(False)
+        option = QStyleOptionProgressBar()
+        self.initStyleOption(option)
+        self.style().drawControl(
+            QStyle.ControlElement.CE_ProgressBarLabel, option, painter
+        )
 
 
 class VersionList(QListWidget):
@@ -704,7 +869,10 @@ class VersionList(QListWidget):
 class LogView(QPlainTextEdit):
     """Read-only console with a smoothly animated auto-scroll."""
 
+    # Visible block budget only: the full record history stays in _records so
+    # an export is never limited to what the widget still displays.
     MAX_RECORDS = 5000
+    FLUSH_INTERVAL_MS = 100
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -715,6 +883,11 @@ class LogView(QPlainTextEdit):
         self.setWordWrapMode(QTextOption.WrapMode.WrapAtWordBoundaryOrAnywhere)
         self.auto_scroll = True
         self._records: list[tuple[str, str, str]] = []
+        self._pending: list[str] = []
+        self._flush_timer = QTimer(self)
+        self._flush_timer.setSingleShot(True)
+        self._flush_timer.setInterval(self.FLUSH_INTERVAL_MS)
+        self._flush_timer.timeout.connect(self._flush_pending)
         self._scroll_anim = QPropertyAnimation(self.verticalScrollBar(), b"value", self)
         self._scroll_anim.setDuration(anim.ms(220))
         self._scroll_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
@@ -722,11 +895,19 @@ class LogView(QPlainTextEdit):
     def add(self, level: str, message: str) -> None:
         stamp = datetime.now().strftime("%H:%M:%S")
         self._records.append((stamp, level, message))
-        if len(self._records) > self.MAX_RECORDS:
-            self._records = self._records[-self.MAX_RECORDS :]
+        self._pending.append(self._render(stamp, level, message))
+        if not self._flush_timer.isActive():
+            self._flush_timer.start()
+
+    def _flush_pending(self) -> None:
+        """Append every line collected during the throttle window at once."""
+        if not self._pending:
+            return
+        chunk = "<br>".join(self._pending)
+        self._pending.clear()
         bar = self.verticalScrollBar()
         old_value = bar.value()
-        self.appendHtml(self._render(stamp, level, message))
+        self.appendHtml(chunk)
         if self.auto_scroll:
             # appendHtml can jump to the end; restore and animate instead.
             bar.setValue(old_value)
@@ -748,14 +929,37 @@ class LogView(QPlainTextEdit):
 
     def clear_logs(self) -> None:
         self._scroll_anim.stop()
+        self._flush_timer.stop()
+        self._pending.clear()
         self._records.clear()
         self.clear()
 
+    def toPlainText(self) -> str:
+        # Readers (for example the copy button) must never miss lines that are
+        # still waiting in the throttle window.
+        if self._pending:
+            self._flush_timer.stop()
+            self._flush_pending()
+        return super().toPlainText()
+
+    def record_count(self) -> int:
+        """Number of records retained for export (not the displayed blocks)."""
+        return len(self._records)
+
+    def export_text(self) -> str:
+        """Plain-text snapshot of every retained record, oldest first."""
+        return "\n".join(
+            f"[{stamp}] {theme.LOG_LEVELS.get(level, level.upper())} {message}"
+            for stamp, level, message in list(self._records)
+        )
+
     def refresh_theme(self) -> None:
-        records = list(self._records)
+        self._flush_timer.stop()
+        self._pending.clear()
+        records = self._records[-self.MAX_RECORDS :]
         self.clear()
-        for stamp, level, message in records:
-            self.appendHtml(self._render(stamp, level, message))
+        if records:
+            self.appendHtml("<br>".join(self._render(*record) for record in records))
         if self.auto_scroll:
             QTimer.singleShot(0, self._smooth_scroll_to_bottom)
 
